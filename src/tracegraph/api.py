@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from tracegraph import __version__
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
-    DEFAULT_WORKSPACE_ADAPTER_ID,
     DEFAULT_WORKSPACE_ID,
     MAX_HOPS,
     Answer,
@@ -42,6 +41,11 @@ from tracegraph.core.ports import (
     Retriever,
 )
 from tracegraph.domains.medical.adapter import MedicalDomainAdapter
+from tracegraph.domains.registry import (
+    AdapterRegistry,
+    UnknownAdapterError,
+    build_default_adapter_registry,
+)
 from tracegraph.feedback.service import FeedbackService
 from tracegraph.feedback.storage import InMemoryFeedbackRepository
 from tracegraph.generation.models import (
@@ -123,8 +127,9 @@ class QueryRequest(BaseModel):
 
 class WorkspaceCreateRequest(BaseModel):
     name: str
-    # 当前只有一个领域适配器，缺省即医疗；本阶段不做适配器动态加载。
-    adapter_id: str = DEFAULT_WORKSPACE_ADAPTER_ID
+    # 必填：适配器决定这个 Workspace 按哪个领域组织知识。给一个「恰好是
+    # 医疗」的默认值会让调用方以为这项选择是可选的，因此不给默认值。
+    adapter_id: str
 
 
 class FeedbackRequest(BaseModel):
@@ -151,6 +156,7 @@ def create_app(
     generation_status: Mapping[str, str] | None = None,
     model_registry: ModelRegistry | None = None,
     original_store: OriginalDocumentStore | None = None,
+    adapter_registry: AdapterRegistry | None = None,
 ) -> FastAPI:
     document_repository = (
         repository if repository is not None else InMemoryDocumentRepository()
@@ -161,6 +167,8 @@ def create_app(
     )
     active_retriever = retriever or KeywordRetriever(document_repository)
     active_domain = domain or MedicalDomainAdapter()
+    # 适配器 ID 的合法值只有一个来源：注册表。API 层不再自己维护一份清单。
+    known_adapters = adapter_registry or build_default_adapter_registry()
     answer_service = AnswerService(
         active_retriever,
         active_domain,
@@ -306,15 +314,29 @@ def create_app(
         """可选生成器清单。刻意不含 base_url：它可能带凭证。"""
         return answer_service.registry.describe()
 
+    @application.get("/adapters")
+    def adapters() -> dict[str, object]:
+        """服务端内置的领域适配器清单；浏览器只能读，不能注册或修改。"""
+        return known_adapters.describe()
+
     @application.post("/workspaces")
     def create_workspace(request: WorkspaceCreateRequest) -> dict[str, str]:
         name = request.name.strip()
         if not name:
             raise ApiError(400, "invalid_request", "name 不能为空。")
+        adapter_id = request.adapter_id.strip()
+        if not adapter_id:
+            raise ApiError(400, "invalid_adapter", "adapter_id 不能为空。")
+        try:
+            # 只做校验，不消费适配器：本批 Workspace 只记录 adapter_id，
+            # 查询链路仍固定使用装配时传入的领域适配器。
+            known_adapters.resolve(adapter_id)
+        except UnknownAdapterError as error:
+            raise ApiError(400, "invalid_adapter", str(error)) from error
         workspace = Workspace(
             id=f"ws-{uuid.uuid4().hex}",
             name=name,
-            adapter_id=request.adapter_id.strip() or DEFAULT_WORKSPACE_ADAPTER_ID,
+            adapter_id=adapter_id,
             created_at=datetime.now(UTC).isoformat(),
         )
         document_repository.save_workspace(workspace)

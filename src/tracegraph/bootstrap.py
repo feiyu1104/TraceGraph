@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from tracegraph.api import create_app
 from tracegraph.config import load_local_env
 from tracegraph.domains.medical.adapter import MedicalDomainAdapter
+from tracegraph.domains.registry import build_default_adapter_registry
 from tracegraph.feedback.storage import SQLiteFeedbackRepository
 from tracegraph.generation.config import FALLBACK_EXTRACTIVE, load_generation_fallback
 from tracegraph.generation.models import ModelRegistry, load_model_registry
@@ -58,6 +59,7 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
         graph_status=selection.to_dict(),
         generation_status=registry.system_status(fallback_name),
         original_store=originals,
+        adapter_registry=build_default_adapter_registry(),
     )
 
 
