@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 import sqlite3
 
@@ -16,7 +17,7 @@ from tracegraph.core.contracts import (
     Workspace,
 )
 from tracegraph.ingestion.lifecycle import DocumentLifecycleService
-from tracegraph.ingestion.service import TextIngestionService
+from tracegraph.ingestion.service import OriginalConflictError, TextIngestionService
 from tracegraph.retrieval.keyword import KeywordRetriever
 from tracegraph.storage.memory import InMemoryDocumentRepository
 from tracegraph.storage.originals import (
@@ -27,6 +28,18 @@ from tracegraph.storage.sqlite import SQLiteDocumentRepository
 
 _GUIDELINE = "# 高血压\n\n患者应定期监测血压。"
 _OTHER = "# 高血压\n\n应避免自行调整降压药物。"
+# 与 _GUIDELINE 解码后完全相同，原始字节却不同：BOM 只影响字节，不影响正文。
+_GUIDELINE_WITH_BOM = b"\xef\xbb\xbf" + _GUIDELINE.encode("utf-8")
+
+
+@pytest.fixture(params=["sqlite", "memory"])
+def repository(request, tmp_path):
+    """同一套用例分别跑在两种仓储实现上，保证行为一致。"""
+    if request.param == "sqlite":
+        with SQLiteDocumentRepository(tmp_path / "tracegraph.db") as sqlite_repository:
+            yield sqlite_repository
+    else:
+        yield InMemoryDocumentRepository()
 
 
 def _store(tmp_path) -> FileSystemOriginalStore:
@@ -52,16 +65,20 @@ def _files_under(directory: Path) -> list[str]:
     )
 
 
+async def _post(application, path: str, payload: dict[str, object]) -> httpx2.Response:
+    transport = httpx2.ASGITransport(app=application)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        return await client.post(path, json=payload)
+
+
 async def _upload(application, filename: str, raw: bytes, workspace_id: str | None = None):
-    payload: dict[str, str] = {
+    payload: dict[str, object] = {
         "filename": filename,
         "content_base64": base64.b64encode(raw).decode("ascii"),
     }
     if workspace_id is not None:
         payload["workspace_id"] = workspace_id
-    transport = httpx2.ASGITransport(app=application)
-    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post("/ingestions/file", json=payload)
+    return await _post(application, "/ingestions/file", payload)
 
 
 async def _get(application, path: str) -> httpx2.Response:
@@ -127,6 +144,9 @@ def test_reuploading_same_original_does_not_create_another_version(tmp_path) -> 
         assert second.job.status is IngestionStatus.SKIPPED
         assert second.version == first.version
         assert second.chunks == first.chunks
+        # 原件哈希一致，已记录的原件不会被重写。
+        assert second.version.original_sha256 == first.version.original_sha256
+        assert second.version.stored_path == first.version.stored_path
         assert repository.list_versions(first.document.id) == (first.version,)
         # 磁盘上也只留一份原件，没有多出一层版本目录。
         assert _files_under(store.root / first.version.stored_path.rsplit("/", 1)[0]) == [
@@ -293,6 +313,49 @@ def test_original_endpoint_reports_missing_original(tmp_path) -> None:
     assert response.json()["error_code"] == "not_found"
 
 
+def test_upload_backfills_original_for_a_text_only_version(tmp_path) -> None:
+    store = _store(tmp_path)
+    application = create_app(InMemoryDocumentRepository(), original_store=store)
+    raw = _GUIDELINE.encode("utf-8")
+
+    # 先用文本入库造一条只有解析结果的版本。
+    text_only = anyio.run(
+        _post,
+        application,
+        "/ingestions",
+        {"source_name": "指南.md", "content": _GUIDELINE},
+    )
+    assert text_only.status_code == 200
+    assert text_only.json()["version"]["stored_path"] is None
+    version_id = text_only.json()["version"]["id"]
+
+    uploaded = anyio.run(_upload, application, "指南.md", raw)
+
+    assert uploaded.status_code == 200
+    assert uploaded.json()["job"]["status"] == "skipped"
+    version = uploaded.json()["version"]
+    assert version["id"] == version_id
+    assert version["original_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert store.read(version["stored_path"]) == raw
+
+
+def test_conflicting_original_is_reported_by_the_endpoint(tmp_path) -> None:
+    store = _store(tmp_path)
+    application = create_app(InMemoryDocumentRepository(), original_store=store)
+
+    first = anyio.run(_upload, application, "指南.md", _GUIDELINE.encode("utf-8"))
+    assert first.status_code == 200
+
+    conflict = anyio.run(_upload, application, "指南.md", _GUIDELINE_WITH_BOM)
+
+    assert conflict.status_code == 409
+    assert conflict.json()["error_code"] == "original_conflict"
+    # 冲突不动已经存好的原件。
+    assert store.read(first.json()["version"]["stored_path"]) == _GUIDELINE.encode(
+        "utf-8"
+    )
+
+
 def test_upload_to_named_workspace_lands_under_that_workspace(tmp_path) -> None:
     store = _store(tmp_path)
     repository = InMemoryDocumentRepository()
@@ -305,6 +368,148 @@ def test_upload_to_named_workspace_lands_under_that_workspace(tmp_path) -> None:
     stored_path = response.json()["version"]["stored_path"]
     assert stored_path.startswith("ws-cardio/documents/")
     assert store.read(stored_path) == raw
+
+
+def test_later_upload_backfills_original_for_a_text_only_version(tmp_path, repository) -> None:
+    store = _store(tmp_path)
+    raw = _GUIDELINE.encode("utf-8")
+
+    # 先经文本入库：这条历史版本只有解析结果，没有原件。
+    text_only = TextIngestionService(repository).ingest_bytes("指南.md", raw)
+    assert text_only.version.stored_path is None
+
+    service = TextIngestionService(repository, original_store=store)
+    result = service.ingest_bytes("指南.md", raw)
+
+    assert result.job.status is IngestionStatus.SKIPPED
+    assert result.version.id == text_only.version.id
+    assert result.version.original_sha256 == hashlib.sha256(raw).hexdigest()
+    assert result.version.original_size == len(raw)
+    assert result.version.original_filename == "指南.md"
+    assert store.read(result.version.stored_path) == raw
+    # 补存不新增版本，也不新增 Chunk。
+    assert repository.list_versions(result.document.id) == (result.version,)
+    assert tuple(chunk.id for chunk in result.chunks) == tuple(
+        chunk.id for chunk in text_only.chunks
+    )
+    assert repository.get_version(result.version.id) == result.version
+
+
+def test_attach_original_only_applies_to_versions_without_one(
+    tmp_path, repository
+) -> None:
+    store = _store(tmp_path)
+    result = TextIngestionService(repository, original_store=store).ingest_bytes(
+        "指南.md", _GUIDELINE.encode("utf-8")
+    )
+
+    with pytest.raises(ValueError, match="还没有原件"):
+        repository.attach_original(
+            result.version.id,
+            original_sha256="0" * 64,
+            original_size=1,
+            stored_path="ws-default/documents/x/y/original.md",
+            original_filename="其他.md",
+        )
+    with pytest.raises(ValueError, match="还没有原件"):
+        repository.attach_original(
+            "ver-missing",
+            original_sha256="0" * 64,
+            original_size=1,
+            stored_path="ws-default/documents/x/y/original.md",
+            original_filename="其他.md",
+        )
+
+    # 已有原件原样保留，没有被条件更新碰到。
+    assert repository.get_version(result.version.id) == result.version
+
+
+def test_same_text_with_different_bytes_never_replaces_the_stored_original(
+    tmp_path, repository
+) -> None:
+    store = _store(tmp_path)
+    service = TextIngestionService(repository, original_store=store)
+    first = service.ingest_bytes("指南.md", _GUIDELINE.encode("utf-8"))
+
+    # 解析文本相同（正文哈希一致），原始字节不同：不能静默覆盖。
+    with pytest.raises(OriginalConflictError, match="原件"):
+        service.ingest_bytes("指南.md", _GUIDELINE_WITH_BOM)
+
+    assert repository.get_version(first.version.id) == first.version
+    assert repository.list_versions(first.document.id) == (first.version,)
+    assert store.read(first.version.stored_path) == _GUIDELINE.encode("utf-8")
+    assert _files_under(store.root) == [first.version.stored_path]
+
+
+def test_failed_backfill_leaves_no_original_behind(
+    tmp_path, repository, monkeypatch
+) -> None:
+    store = _store(tmp_path)
+    raw = _GUIDELINE.encode("utf-8")
+    text_only = TextIngestionService(repository).ingest_bytes("指南.md", raw)
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("数据库写入失败")
+
+    monkeypatch.setattr(repository, "attach_original", explode)
+    with pytest.raises(sqlite3.OperationalError):
+        TextIngestionService(repository, original_store=store).ingest_bytes(
+            "指南.md", raw
+        )
+
+    assert _files_under(store.root) == []
+    assert repository.get_version(text_only.version.id) == text_only.version
+
+
+def test_ingest_file_saves_the_original(tmp_path, repository) -> None:
+    store = _store(tmp_path)
+    raw = _GUIDELINE.encode("utf-8")
+    path = tmp_path / "指南.md"
+    path.write_bytes(raw)
+
+    result = TextIngestionService(repository, original_store=store).ingest_file(path)
+
+    assert result.version.original_filename == "指南.md"
+    assert result.version.original_sha256 == hashlib.sha256(raw).hexdigest()
+    assert result.version.original_size == len(raw)
+    assert store.read(result.version.stored_path) == raw
+
+
+def test_ingest_file_honours_workspace_and_missing_store(tmp_path, repository) -> None:
+    store = _store(tmp_path)
+    repository.save_workspace(_workspace("ws-cardio"))
+    path = tmp_path / "指南.md"
+    path.write_bytes(_GUIDELINE.encode("utf-8"))
+
+    scoped = TextIngestionService(repository, original_store=store).ingest_file(
+        path, "ws-cardio"
+    )
+    assert scoped.document.workspace_id == "ws-cardio"
+    assert scoped.version.stored_path.startswith("ws-cardio/documents/")
+
+    # 未装配原件存储时行为与之前一致：只入库解析结果。
+    plain = TextIngestionService(repository).ingest_file(path)
+    assert plain.version.stored_path is None
+
+
+def test_failed_file_write_leaves_no_temporary_file(tmp_path, monkeypatch) -> None:
+    store = _store(tmp_path)
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise OSError("原子替换失败")
+
+    monkeypatch.setattr(os, "replace", explode)
+    with pytest.raises(OSError):
+        store.save(
+            workspace_id="ws-default",
+            document_id="doc-1",
+            version_id="ver-1",
+            suffix=".md",
+            raw=b"x",
+        )
+
+    # 临时文件不能留在磁盘上。
+    assert _files_under(store.root) == []
 
 
 def test_upload_with_unsupported_suffix_is_rejected_without_touching_disk(tmp_path) -> None:

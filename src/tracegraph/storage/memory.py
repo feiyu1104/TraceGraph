@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from threading import RLock
 
@@ -137,6 +138,30 @@ class InMemoryDocumentRepository:
     def get_version(self, version_id: str) -> DocumentVersion | None:
         with self._lock:
             return self._versions.get(version_id)
+
+    def attach_original(
+        self,
+        version_id: str,
+        *,
+        original_sha256: str,
+        original_size: int,
+        stored_path: str,
+        original_filename: str,
+    ) -> DocumentVersion:
+        with self._lock:
+            version = self._versions.get(version_id)
+            # 与 SQLite 的条件更新一致：已有原件的版本不允许被覆盖。
+            if version is None or version.stored_path is not None:
+                raise ValueError("只能给还没有原件的版本补存原件")
+            updated = replace(
+                version,
+                original_sha256=original_sha256,
+                original_size=original_size,
+                stored_path=stored_path,
+                original_filename=original_filename,
+            )
+            self._versions[version_id] = updated
+            return updated
 
     def list_chunks(self, document_version_id: str) -> tuple[Chunk, ...]:
         with self._lock:

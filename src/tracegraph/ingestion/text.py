@@ -21,17 +21,6 @@ class ChunkDraft:
     locator: str
 
 
-def read_text_document(path: Path) -> str:
-    if path.suffix.lower() not in SUPPORTED_SUFFIXES:
-        raise UnsupportedDocumentError(UNSUPPORTED_DOCUMENT_MESSAGE)
-
-    if path.suffix.lower() == ".pdf":
-        return _read_pdf(path)
-
-    raw = path.read_bytes()
-    return read_document_bytes(path.name, raw)
-
-
 def read_document_bytes(source_name: str, raw: bytes) -> str:
     suffix = Path(source_name).suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:

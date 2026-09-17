@@ -189,6 +189,50 @@ class SQLiteDocumentRepository:
             ).fetchone()
         return _version_from_row(row) if row else None
 
+    def attach_original(
+        self,
+        version_id: str,
+        *,
+        original_sha256: str,
+        original_size: int,
+        stored_path: str,
+        original_filename: str,
+    ) -> DocumentVersion:
+        with self._lock, self._connection:
+            # 条件写死在 UPDATE 里：先查再写会留下「查到时为空、写的时候已经
+            # 被填上」的窗口，正好把别人刚存的原件覆盖掉。
+            cursor = self._connection.execute(
+                """
+                UPDATE document_versions
+                SET original_sha256 = ?, original_size = ?,
+                    stored_path = ?, original_filename = ?
+                WHERE id = ?
+                  AND original_sha256 IS NULL
+                  AND original_size IS NULL
+                  AND stored_path IS NULL
+                  AND original_filename IS NULL
+                """,
+                (
+                    original_sha256,
+                    original_size,
+                    stored_path,
+                    original_filename,
+                    version_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("只能给还没有原件的版本补存原件")
+            row = self._connection.execute(
+                """
+                SELECT id, document_id, number, content_sha256,
+                       original_sha256, original_size, stored_path, original_filename
+                FROM document_versions
+                WHERE id = ?
+                """,
+                (version_id,),
+            ).fetchone()
+        return _version_from_row(row)
+
     def list_chunks(self, document_version_id: str) -> tuple[Chunk, ...]:
         with self._lock:
             rows = self._connection.execute(

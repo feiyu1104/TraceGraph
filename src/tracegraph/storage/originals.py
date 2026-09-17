@@ -19,6 +19,8 @@ ORIGINALS_DIR_ENV = "TRACEGRAPH_ORIGINALS_DIR"
 DEFAULT_ORIGINALS_DIR = "data/workspaces"
 
 _ORIGINAL_STEM = "original"
+# 写入过程中的临时文件后缀，只在 save 内部出现，不会成为任何正式落点。
+_TEMPORARY_SUFFIX = ".part"
 # 路径片段白名单：ID 形如 ws-default / doc-<hex> / ver-<hex>，都不含分隔符，
 # 也不可能等于 "." 或 ".."。
 _SEGMENT_PATTERN = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
@@ -56,7 +58,19 @@ class FileSystemOriginalStore:
         directory = self._version_directory(workspace_id, document_id, version_id)
         directory.mkdir(parents=True, exist_ok=True)
         target = self._contained(directory / f"{_ORIGINAL_STEM}{_checked_suffix(suffix)}")
-        target.write_bytes(raw)
+        # 先写临时文件再原子替换：正式文件要么不存在，要么就是完整的一份，
+        # 不会留下读到一半的内容。临时文件名是模块常量，不含用户输入，
+        # 与目标同目录，因此替换不会跨卷。
+        temporary = target.with_name(f"{_ORIGINAL_STEM}{_TEMPORARY_SUFFIX}")
+        try:
+            with open(temporary, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         return target.relative_to(self._root).as_posix()
 
     def read(self, stored_path: str) -> bytes | None:

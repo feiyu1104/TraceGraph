@@ -64,6 +64,22 @@ class DocumentRepository(Protocol):
 
     def get_version(self, version_id: str) -> DocumentVersion | None: ...
 
+    def attach_original(
+        self,
+        version_id: str,
+        *,
+        original_sha256: str,
+        original_size: int,
+        stored_path: str,
+        original_filename: str,
+    ) -> DocumentVersion:
+        """给一个还没有原件的版本补上原件元信息，返回更新后的版本。
+
+        四个字段一次性写入，不存在只补一半的中间状态。条件判断在存储层
+        完成：已有原件的版本不允许被覆盖，此时抛 ValueError。
+        """
+        ...
+
     def list_chunks(self, document_version_id: str) -> tuple[Chunk, ...]: ...
 
     def get_chunk(self, chunk_id: str) -> Chunk | None: ...

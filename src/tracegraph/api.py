@@ -51,7 +51,11 @@ from tracegraph.generation.models import (
 )
 from tracegraph.generation.providers import AnswerGenerator, relation_label
 from tracegraph.generation.service import AnswerService
-from tracegraph.ingestion.service import IngestionResult, TextIngestionService
+from tracegraph.ingestion.service import (
+    IngestionResult,
+    OriginalConflictError,
+    TextIngestionService,
+)
 from tracegraph.ingestion.lifecycle import DocumentLifecycleService
 from tracegraph.ingestion.text import UnsupportedDocumentError
 from tracegraph.observability import RequestMetrics
@@ -345,6 +349,8 @@ def create_app(
             )
         except UnsupportedDocumentError as error:
             raise ApiError(400, "unsupported_document", str(error)) from error
+        except OriginalConflictError as error:
+            raise ApiError(409, "original_conflict", str(error)) from error
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
         return _ingestion_result_response(result)
@@ -367,6 +373,8 @@ def create_app(
             )
         except UnsupportedDocumentError as error:
             raise ApiError(400, "unsupported_document", str(error)) from error
+        except OriginalConflictError as error:
+            raise ApiError(409, "original_conflict", str(error)) from error
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
         return _ingestion_result_response(result)
