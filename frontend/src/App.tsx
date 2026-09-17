@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import {
   ApiRequestError,
@@ -161,12 +161,23 @@ export default function App() {
     setHasAsked(false)
   }, [])
 
+  // handleCreated 是在建库请求的 await 之后才被调用的，直接读闭包里的 busy
+  // 拿到的是「点创建那一刻」的旧值 —— 建库在飞的时候用户完全可以再发起一次
+  // 查询。用 ref 取最新值，判断的才是「创建成功的这一刻」在不在忙。
+  const requestBusyRef = useRef(false)
+  useEffect(() => {
+    requestBusyRef.current = busy || uploadBusy
+  }, [busy, uploadBusy])
+
   const handleCreated = useCallback(
-    (workspace: WorkspaceInfo) => {
+    (workspace: WorkspaceInfo): boolean => {
       setWorkspaces((current) =>
         current.some((item) => item.id === workspace.id) ? current : [...current, workspace],
       )
+      // 进行中切换会让跑着的结果落到另一个知识库上。
+      if (requestBusyRef.current) return false
       selectWorkspace(workspace.id)
+      return true
     },
     [selectWorkspace],
   )
@@ -243,6 +254,7 @@ export default function App() {
         adapters={adapters}
         adaptersError={adaptersError}
         listNotice={workspacesNotice}
+        supportsGraph={supportsGraph}
         disabled={busy || uploadBusy}
         onCreated={handleCreated}
       />
@@ -261,6 +273,7 @@ export default function App() {
               busy={busy}
               multiHopEnabled={supportsGraph}
               retrievalNotice={supportsGraph ? null : KEYWORD_ONLY_NOTICE}
+              adapterId={currentWorkspace?.adapter_id ?? ''}
               modelSelector={
                 <ModelSelector
                   models={models}
