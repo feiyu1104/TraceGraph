@@ -219,6 +219,23 @@ class InMemoryCandidateRepository:
         with self._lock:
             return self._relations.get(candidate_id)
 
+    def list_published_relations(
+        self, workspace_id: str, graph_relation_id: str
+    ) -> tuple[CandidateRelation, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        relation
+                        for relation in self._relations.values()
+                        if relation.workspace_id == workspace_id
+                        and relation.graph_id == graph_relation_id
+                        and relation.is_published
+                    ),
+                    key=lambda relation: (relation.extraction_run_id, relation.id),
+                )
+            )
+
     def save_entity(self, entity: CandidateEntity) -> None:
         # 只替换可变字段：归属、文档与证据由抽取产生，服务层即使传进来一个
         # 改过 document_id 的对象，落库的仍是原来那一份。
@@ -654,6 +671,23 @@ class SQLiteCandidateRepository:
                 return None
             evidence = self._relation_evidence((candidate_id,))
         return _relation_from_row(row, evidence.get(candidate_id, ()))
+
+    def list_published_relations(
+        self, workspace_id: str, graph_relation_id: str
+    ) -> tuple[CandidateRelation, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT * FROM candidate_relations
+                WHERE workspace_id = ? AND graph_id = ? AND published_at IS NOT NULL
+                ORDER BY extraction_run_id, id
+                """,
+                (workspace_id, graph_relation_id),
+            ).fetchall()
+            evidence = self._relation_evidence(tuple(row["id"] for row in rows))
+        return tuple(
+            _relation_from_row(row, evidence.get(row["id"], ())) for row in rows
+        )
 
     def save_entity(self, entity: CandidateEntity) -> None:
         # 可写列就是这几列：workspace_id 与 document_id 等既不在 SET 里，也在

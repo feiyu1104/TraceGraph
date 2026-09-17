@@ -156,23 +156,39 @@ export async function uploadDocument(
   )
 }
 
-export function searchEntities(query: string, limit = 10): Promise<EntitySearchResult> {
-  const params = new URLSearchParams({ query, limit: String(limit) })
+export function searchEntities(
+  query: string,
+  workspaceId: string,
+  limit = 10,
+): Promise<EntitySearchResult> {
+  const params = new URLSearchParams({
+    query,
+    workspace_id: workspaceId,
+    limit: String(limit),
+  })
   return request<EntitySearchResult>(`/graph/entities?${params}`)
 }
 
 export function fetchEntityRelations(
   entityId: string,
+  workspaceId: string,
   limit = 30,
 ): Promise<EntityRelations> {
-  const params = new URLSearchParams({ limit: String(limit) })
+  const params = new URLSearchParams({
+    workspace_id: workspaceId,
+    limit: String(limit),
+  })
   return request<EntityRelations>(
     `/graph/entities/${encodeURIComponent(entityId)}/relations?${params}`,
   )
 }
 
-export function fetchRelationEvidence(relationId: string): Promise<RelationEvidence> {
+export function fetchRelationEvidence(
+  relationId: string,
+  workspaceId: string,
+): Promise<RelationEvidence> {
+  const params = new URLSearchParams({ workspace_id: workspaceId })
   return request<RelationEvidence>(
-    `/graph/relations/${encodeURIComponent(relationId)}/evidence`,
+    `/graph/relations/${encodeURIComponent(relationId)}/evidence?${params}`,
   )
 }

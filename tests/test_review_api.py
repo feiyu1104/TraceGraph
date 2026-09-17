@@ -248,6 +248,24 @@ def test_publishing_an_approved_batch_and_repeating_it(client) -> None:
     assert client.graph.statistics(DEFAULT_WORKSPACE_ID).entities == len(entity_ids)
 
 
+def test_published_candidates_expose_their_graph_mapping(client) -> None:
+    _approve_all(client, client.own_run["id"])
+    client.post(
+        f"/workspaces/{DEFAULT_WORKSPACE_ID}/graph-publications",
+        json={"extraction_run_id": client.own_run["id"]},
+    )
+
+    payload = client.get(
+        f"/extractions/{client.own_run['id']}/candidates"
+    ).json()
+
+    for candidate in (*payload["entities"], *payload["relations"]):
+        assert candidate["workspace_id"] == DEFAULT_WORKSPACE_ID
+        assert candidate["is_published"] is True
+        assert candidate["published_at"]
+        assert candidate["graph_id"]
+
+
 def test_publishing_a_run_publishes_everything_approved(client) -> None:
     _approve_all(client, client.own_run["id"])
 
@@ -303,6 +321,13 @@ def test_published_graph_is_visible_through_the_graph_endpoints(client) -> None:
     assert evidence["evidence"]
     assert evidence["evidence"][0]["content"]
     assert evidence["evidence"][0]["source_name"] == "dutmed-百日咳.md"
+    assert evidence["evidence"][0]["document_id"] == client.own.document.id
+    assert evidence["evidence"][0]["document_version_id"] == client.own.version.id
+    assert evidence["sources"]
+    assert evidence["sources"][0]["extraction_run_id"] == client.own_run["id"]
+    assert evidence["sources"][0]["candidate_relation_id"]
+    assert evidence["sources"][0]["document_id"] == client.own.document.id
+    assert evidence["sources"][0]["document_version_id"] == client.own.version.id
 
 
 def test_graph_endpoints_require_a_workspace_id(client) -> None:

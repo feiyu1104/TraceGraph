@@ -9,6 +9,7 @@ export function evidenceAnchorId(evidenceId: string): string {
 
 interface EvidenceDrawerProps {
   evidences: Evidence[]
+  workspaceId: string
   open: boolean
   onToggle: () => void
   /** 从引用角标跳过来的目标；nonce 变化即重新滚动一次 */
@@ -17,6 +18,7 @@ interface EvidenceDrawerProps {
 
 export default function EvidenceDrawer({
   evidences,
+  workspaceId,
   open,
   onToggle,
   reveal,
@@ -67,7 +69,11 @@ export default function EvidenceDrawer({
               </p>
               <p className="evidences__content">{evidence.content}</p>
               {evidence.graph_path && (
-                <GraphPath path={evidence.graph_path} showHopBadge={false} />
+                <GraphPath
+                  path={evidence.graph_path}
+                  workspaceId={workspaceId}
+                  showHopBadge={false}
+                />
               )}
             </li>
           ))}

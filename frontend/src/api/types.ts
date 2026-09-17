@@ -107,8 +107,20 @@ export interface SystemInfo {
 export interface RelationEvidenceChunk {
   chunk_id: string
   content: string
+  document_id: string
+  document_version_id: string
   source_name: string
   locator: string
+}
+
+export interface RelationPublicationSource {
+  candidate_relation_id: string
+  extraction_run_id: string
+  workspace_id: string
+  document_id: string
+  document_version_id: string
+  evidence_chunk_ids: string[]
+  published_at: string
 }
 
 export interface RelationEvidence {
@@ -119,6 +131,7 @@ export interface RelationEvidence {
     target: Entity | null
   }
   evidence: RelationEvidenceChunk[]
+  sources: RelationPublicationSource[]
 }
 
 export interface RelationEvidenceRef {

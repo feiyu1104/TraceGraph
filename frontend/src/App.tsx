@@ -142,12 +142,10 @@ export default function App() {
   }, [])
 
   const currentWorkspace = workspaces.find((workspace) => workspace.id === workspaceId) ?? null
-  // 只有「默认知识库 + 医疗适配器」走混合检索（关键词 + Neo4j 多跳），其余知识库
-  // 一律关键词检索。判定条件与后端 _retrieval_route 一致，这里只用来决定界面
-  // 允许点什么；真正走哪条链路仍由服务端按 Workspace 记录决定。
-  const supportsGraph =
-    workspaceId === FALLBACK_WORKSPACE.id && currentWorkspace?.adapter_id === 'medical'
-  // 非图知识库把跳数收敛到 1，但不覆盖用户的选择：切回医疗库时偏好还在。
+  // 图后端已按 Workspace 隔离，因此能否使用图谱只取决于服务端是否
+  // 启用图存储，不再绑定默认医疗知识库。
+  const supportsGraph = system !== null && system.graph_backend !== 'disabled'
+  // 图后端真正不可用时才把跳数收敛到 1。
   const effectiveMaxHops = supportsGraph ? maxHops : 1
 
   const selectWorkspace = useCallback((nextId: string) => {
@@ -296,6 +294,7 @@ export default function App() {
               hasAsked={hasAsked}
               generatorLabel={generatorLabel}
               workspaceLabel={usedWorkspaceLabel}
+              workspaceId={usedWorkspaceId ?? workspaceId}
               adapterLabel={usedAdapterLabel}
               retrieverLabel={usedRetrieverLabel}
               drawerOpen={drawerOpen}
@@ -311,12 +310,10 @@ export default function App() {
           <div className="panel">
             <h2 className="panel__title">图谱浏览</h2>
             {supportsGraph ? (
-              <GraphExplorer />
+              <GraphExplorer key={workspaceId} workspaceId={workspaceId} />
             ) : (
-              // 图索引目前只有 DUTMed 医疗图，且没有 Workspace 维度：
-              // 这里给说明，而不是伪造一张空图，也不把医疗图搬进别的知识库。
               <p className="panel__note">
-                当前知识库尚未发布审核后的图关系，因此暂时只能使用文本检索。
+                当前服务未启用图存储，暂时只能使用文本检索。
               </p>
             )}
           </div>

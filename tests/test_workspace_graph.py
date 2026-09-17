@@ -238,6 +238,45 @@ def test_migration_is_idempotent_and_does_not_overwrite(tmp_path) -> None:
     third.close()
 
 
+def test_migration_repairs_a_partially_migrated_graph_schema(tmp_path) -> None:
+    path = tmp_path / "partial.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE entities (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            workspace_id TEXT NOT NULL DEFAULT 'ws-default'
+        );
+        CREATE TABLE relations (
+            id TEXT PRIMARY KEY,
+            source_entity_id TEXT NOT NULL REFERENCES entities(id),
+            target_entity_id TEXT NOT NULL REFERENCES entities(id),
+            type TEXT NOT NULL
+        );
+        CREATE TABLE relation_evidence (
+            relation_id TEXT NOT NULL REFERENCES relations(id) ON DELETE CASCADE,
+            chunk_id TEXT NOT NULL,
+            PRIMARY KEY (relation_id, chunk_id)
+        );
+        INSERT INTO entities VALUES ('ent-a', '项目 A', 'Project', 'ws-default');
+        INSERT INTO entities VALUES ('ent-b', '任务 B', 'Task', 'ws-default');
+        INSERT INTO relations VALUES ('rel-a', 'ent-a', 'ent-b', 'RELATED_TO');
+        INSERT INTO relation_evidence VALUES ('rel-a', 'chunk-a');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    repository = SQLiteGraphRepository(path)
+
+    relation = repository.get_relation("rel-a", DEFAULT_WORKSPACE_ID)
+    assert relation is not None
+    assert relation.workspace_id == DEFAULT_WORKSPACE_ID
+    repository.close()
+
+
 def test_consistency_report_is_scoped_to_a_workspace(tmp_path) -> None:
     path = tmp_path / "tracegraph.db"
     documents = SQLiteDocumentRepository(path)

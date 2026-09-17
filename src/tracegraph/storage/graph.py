@@ -767,25 +767,23 @@ class SQLiteGraphRepository:
         份定义，因此两条路径得到完全相同的 schema；仓储的每个写入方法都显式
         写出 workspace_id，这个默认值在代码路径上取不到。
 
-        重复执行不做任何事：列已经存在时直接返回。
+        实体表和关系表分别检查：缺哪列只补哪列。因此上次迁移在两步
+        之间中断时也能继续，已完成的部分不会重做或被覆盖。
         """
-        columns = {
-            row["name"] for row in self._connection.execute("PRAGMA table_info(entities)")
-        }
-        if "workspace_id" in columns:
-            return
-        self._connection.executescript(
-            f"""
-            ALTER TABLE entities
-                ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE_ID}';
-            ALTER TABLE relations
-                ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE_ID}';
-            UPDATE entities SET workspace_id = '{DEFAULT_WORKSPACE_ID}'
-                WHERE workspace_id IS NULL;
-            UPDATE relations SET workspace_id = '{DEFAULT_WORKSPACE_ID}'
-                WHERE workspace_id IS NULL;
-            """
-        )
+        for table in ("entities", "relations"):
+            columns = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            if "workspace_id" not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN workspace_id TEXT NOT NULL "
+                    f"DEFAULT '{DEFAULT_WORKSPACE_ID}'"
+                )
+            self._connection.execute(
+                f"UPDATE {table} SET workspace_id = ? WHERE workspace_id IS NULL",
+                (DEFAULT_WORKSPACE_ID,),
+            )
 
     def _create_workspace_indexes(self) -> None:
         self._connection.executescript(

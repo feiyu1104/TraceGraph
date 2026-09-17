@@ -301,6 +301,12 @@ class CandidateRepository(Protocol):
 
     def get_relation(self, candidate_id: str) -> CandidateRelation | None: ...
 
+    def list_published_relations(
+        self, workspace_id: str, graph_relation_id: str
+    ) -> tuple[CandidateRelation, ...]:
+        """列出发布到同一图关系的候选来源，供图关系证据完整溯源。"""
+        ...
+
     def save_entity(self, entity: CandidateEntity) -> None:
         """更新一条候选实体的可变字段（名称、类型、状态、发布结果）。
 

@@ -1,26 +1,42 @@
 import { Fragment, useEffect, useState } from 'react'
 
 import { fetchRelationEvidence } from '../api/client'
-import type { GraphPath as GraphPathData, RelationEvidenceChunk } from '../api/types'
+import type {
+  GraphPath as GraphPathData,
+  RelationEvidenceChunk,
+  RelationPublicationSource,
+} from '../api/types'
 
 type DetailState =
   | { status: 'loading' }
-  | { status: 'ready'; chunks: RelationEvidenceChunk[] }
+  | {
+      status: 'ready'
+      chunks: RelationEvidenceChunk[]
+      sources: RelationPublicationSource[]
+    }
   | { status: 'error'; message: string }
 
 /**
- * 某条关系溯源到的 DUTMed 原文，点击关系时才去取。
+ * 某条关系溯源到的原文，点击关系时才去取。
  * 原文不进每次回答的响应体，避免把整段正文塞进列表接口。
  */
-export function RelationEvidenceDetail({ relationId }: { relationId: string }) {
+export function RelationEvidenceDetail({
+  relationId,
+  workspaceId,
+}: {
+  relationId: string
+  workspaceId: string
+}) {
   const [state, setState] = useState<DetailState>({ status: 'loading' })
 
   useEffect(() => {
     let cancelled = false
     setState({ status: 'loading' })
-    fetchRelationEvidence(relationId)
+    fetchRelationEvidence(relationId, workspaceId)
       .then((data) => {
-        if (!cancelled) setState({ status: 'ready', chunks: data.evidence })
+        if (!cancelled) {
+          setState({ status: 'ready', chunks: data.evidence, sources: data.sources })
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return
@@ -32,10 +48,10 @@ export function RelationEvidenceDetail({ relationId }: { relationId: string }) {
     return () => {
       cancelled = true
     }
-  }, [relationId])
+  }, [relationId, workspaceId])
 
   if (state.status === 'loading') {
-    return <div className="relation-evidence is-muted">正在读取 DUTMed 原文…</div>
+    return <div className="relation-evidence is-muted">正在读取关系原文…</div>
   }
   if (state.status === 'error') {
     return <div className="relation-evidence is-error">{state.message}</div>
@@ -45,6 +61,19 @@ export function RelationEvidenceDetail({ relationId }: { relationId: string }) {
   }
   return (
     <div className="relation-evidence">
+      {state.sources.length > 0 && (
+        <div className="relation-evidence__item">
+          <p className="meta">
+            发布来源：{state.sources.length} 条已审核候选
+          </p>
+          {state.sources.map((source) => (
+            <p key={source.candidate_relation_id} className="meta">
+              文档版本 {source.document_version_id} · 抽取任务{' '}
+              {source.extraction_run_id} · 候选 {source.candidate_relation_id}
+            </p>
+          ))}
+        </div>
+      )}
       {state.chunks.map((chunk) => (
         <div key={chunk.chunk_id} className="relation-evidence__item">
           <p className="meta">{chunk.source_name} · {chunk.locator}</p>
@@ -57,11 +86,12 @@ export function RelationEvidenceDetail({ relationId }: { relationId: string }) {
 
 interface GraphPathProps {
   path: GraphPathData
+  workspaceId: string
   /** 路径块自身的「直接事实 / 推导关联」标记 */
   showHopBadge?: boolean
 }
 
-export default function GraphPath({ path, showHopBadge = true }: GraphPathProps) {
+export default function GraphPath({ path, workspaceId, showHopBadge = true }: GraphPathProps) {
   const [openRelationId, setOpenRelationId] = useState<string | null>(null)
   const nameById = new Map(path.nodes.map((node) => [node.id, node.name]))
   const isDerived = path.steps.length > 1
@@ -84,7 +114,7 @@ export default function GraphPath({ path, showHopBadge = true }: GraphPathProps)
                 type="button"
                 className={`gpath__edge gpath__edge--${step.direction}`}
                 aria-expanded={open}
-                title="点击查看该关系对应的 DUTMed 原文"
+                title="点击查看该关系对应的原文"
                 onClick={() =>
                   setOpenRelationId((current) =>
                     current === step.relation_id ? null : step.relation_id,
@@ -101,7 +131,9 @@ export default function GraphPath({ path, showHopBadge = true }: GraphPathProps)
         })}
       </div>
 
-      {openRelationId && <RelationEvidenceDetail relationId={openRelationId} />}
+      {openRelationId && (
+        <RelationEvidenceDetail relationId={openRelationId} workspaceId={workspaceId} />
+      )}
 
       {path.truncations.length > 0 && (
         <p className="gpath__truncation">

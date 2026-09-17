@@ -22,7 +22,7 @@ function entityTypeLabel(type: string): string {
   return ENTITY_TYPES[type] ?? type
 }
 
-export default function GraphExplorer() {
+export default function GraphExplorer({ workspaceId }: { workspaceId: string }) {
   const [query, setQuery] = useState('')
   const [entities, setEntities] = useState<Entity[] | null>(null)
   const [entity, setEntity] = useState<Entity | null>(null)
@@ -40,7 +40,7 @@ export default function GraphExplorer() {
     setRelations(null)
     setOpenRelationId(null)
     try {
-      const result = await searchEntities(trimmed)
+      const result = await searchEntities(trimmed, workspaceId)
       setEntities(result.entities)
     } catch (caught) {
       setError(toApiError(caught))
@@ -57,7 +57,7 @@ export default function GraphExplorer() {
     setRelations(null)
     setOpenRelationId(null)
     try {
-      const result = await fetchEntityRelations(target.id)
+      const result = await fetchEntityRelations(target.id, workspaceId)
       setRelations(result.relations)
     } catch (caught) {
       setError(toApiError(caught))
@@ -81,7 +81,7 @@ export default function GraphExplorer() {
             className="field__input"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="疾病、症状、检查或药物名称"
+            placeholder="输入当前知识库中的实体名称"
             autoComplete="off"
           />
         </label>
@@ -95,7 +95,7 @@ export default function GraphExplorer() {
       {entities !== null && entities.length === 0 && !error && (
         <EmptyState
           title="没有找到匹配实体"
-          hint="换一个更完整的名称试试，例如「百日咳」而不是「咳」。"
+          hint="请换一个更完整的名称重试。"
         />
       )}
 
@@ -147,7 +147,7 @@ export default function GraphExplorer() {
             <>
               <p className="meta">
                 共 {relations.length} 条直接关系（受后端返回上限限制，不代表全部）。
-                点击关系查看 DUTMed 来源与原文位置。
+                点击关系查看来源与原文位置。
               </p>
               <ul className="relations__list">
                 {relations.map((relation) => {
@@ -185,7 +185,10 @@ export default function GraphExplorer() {
                               </p>
                             ))
                           )}
-                          <RelationEvidenceDetail relationId={relation.id} />
+                          <RelationEvidenceDetail
+                            relationId={relation.id}
+                            workspaceId={workspaceId}
+                          />
                         </div>
                       )}
                     </li>

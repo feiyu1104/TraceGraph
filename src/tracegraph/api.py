@@ -650,6 +650,12 @@ def create_app(
                 "target": _entity_response(target) if target else None,
             },
             "evidence": _chunk_evidence(document_repository, relation, workspace_id),
+            "sources": [
+                _published_relation_source(source)
+                for source in active_candidates.list_published_relations(
+                    workspace_id, relation.id
+                )
+            ],
         }
 
     @application.post("/query")
@@ -1128,6 +1134,8 @@ def _chunk_evidence(
             {
                 "chunk_id": chunk.id,
                 "content": chunk.content,
+                "document_id": document.id,
+                "document_version_id": chunk.document_version_id,
                 "source_name": document.source_name,
                 "locator": chunk.locator,
             }
@@ -1179,12 +1187,16 @@ def _candidate_entity_response(
     return {
         "id": entity.id,
         "extraction_run_id": entity.extraction_run_id,
+        "workspace_id": entity.workspace_id,
         "document_id": entity.document_id,
         "document_version_id": entity.document_version_id,
         "adapter_id": entity.adapter_id,
         "name": entity.name,
         "type": entity.type,
         "status": entity.status.value,
+        "is_published": entity.is_published,
+        "published_at": entity.published_at,
+        "graph_id": entity.graph_id,
         "evidence": _candidate_evidence(
             document_repository, entity.evidence_chunk_ids
         ),
@@ -1199,6 +1211,7 @@ def _candidate_relation_response(
     return {
         "id": relation.id,
         "extraction_run_id": relation.extraction_run_id,
+        "workspace_id": relation.workspace_id,
         "document_id": relation.document_id,
         "document_version_id": relation.document_version_id,
         "adapter_id": relation.adapter_id,
@@ -1206,11 +1219,27 @@ def _candidate_relation_response(
         "target_entity_id": relation.target_entity_id,
         "type": relation.type,
         "status": relation.status.value,
+        "is_published": relation.is_published,
+        "published_at": relation.published_at,
+        "graph_id": relation.graph_id,
         "evidence": _candidate_evidence(
             document_repository, relation.evidence_chunk_ids
         ),
         "created_at": relation.created_at,
         "updated_at": relation.updated_at,
+    }
+
+
+def _published_relation_source(relation: CandidateRelation) -> dict[str, object]:
+    """图关系对应的候选来源；正文仍通过 evidence 从 SQLite Chunk 获取。"""
+    return {
+        "candidate_relation_id": relation.id,
+        "extraction_run_id": relation.extraction_run_id,
+        "workspace_id": relation.workspace_id,
+        "document_id": relation.document_id,
+        "document_version_id": relation.document_version_id,
+        "evidence_chunk_ids": list(relation.evidence_chunk_ids),
+        "published_at": relation.published_at,
     }
 
 

@@ -38,6 +38,7 @@ interface AnswerPanelProps {
   generatorLabel: string
   /** 本次回答真正生效的知识库 / 适配器 / 检索链路，全部取自响应 metrics。 */
   workspaceLabel: string
+  workspaceId: string
   adapterLabel: string
   retrieverLabel: string
   drawerOpen: boolean
@@ -54,6 +55,7 @@ export default function AnswerPanel({
   hasAsked,
   generatorLabel,
   workspaceLabel,
+  workspaceId,
   adapterLabel,
   retrieverLabel,
   drawerOpen,
@@ -153,6 +155,7 @@ export default function AnswerPanel({
       {answer.evidences.length > 0 && (
         <EvidenceDrawer
           evidences={answer.evidences}
+          workspaceId={workspaceId}
           open={drawerOpen}
           onToggle={onToggleDrawer}
           reveal={reveal}
