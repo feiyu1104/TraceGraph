@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tracegraph"
+version = "0.1.0"
+description = "Evidence-first GraphRAG application framework for domain knowledge"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "pypdf>=5.0,<7.0",
+    "uvicorn>=0.34,<1.0",
+]
+
+[project.optional-dependencies]
+graph = [
+    "neo4j>=5.28,<7.0",
+]
+dev = [
+    "httpx2>=2.13,<3.0",
+    "pytest>=8.3,<10.0",
+]
+
+[project.scripts]
+tracegraph = "tracegraph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-p no:cacheprovider"

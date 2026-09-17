@@ -1,0 +1,21 @@
+{
+  "default": "extractive",
+  "models": [
+    {
+      "id": "main-model",
+      "label": "主模型",
+      "base_url": "https://gateway.example.com/v1",
+      "model": "example-chat-model",
+      "api_key_env": "TRACEGRAPH_MAIN_MODEL_API_KEY",
+      "timeout": 45
+    },
+    {
+      "id": "fast-model",
+      "label": "快速模型",
+      "base_url": "https://gateway.example.com/v1",
+      "model": "example-fast-model",
+      "api_key_env": "TRACEGRAPH_FAST_MODEL_API_KEY",
+      "timeout": 20
+    }
+  ]
+}
