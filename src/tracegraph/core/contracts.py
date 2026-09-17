@@ -39,16 +39,47 @@ class TraversalDirection(StrEnum):
 MAX_HOPS = 3
 DEFAULT_MAX_HOPS = 2
 
+# 既有的、没有 Workspace 概念的库在迁移时全部归入这一个。它由存储层保证
+# 存在，因此不可能是"查不到归属"的文档。
+DEFAULT_WORKSPACE_ID = "ws-default"
+DEFAULT_WORKSPACE_ADAPTER_ID = "medical"
+
+
+@dataclass(frozen=True, slots=True)
+class Workspace:
+    """一个知识场景的隔离单位。
+
+    目前只有文档归属这一层含义：adapter_id 只是记录这份数据按哪个领域
+    适配器组织，本阶段不做适配器动态加载。
+    """
+
+    id: str
+    name: str
+    adapter_id: str
+    created_at: str
+
+    def __post_init__(self) -> None:
+        if not self.id.strip() or not self.name.strip():
+            raise ValueError("Workspace requires a non-empty id and name")
+        if not self.adapter_id.strip():
+            raise ValueError("Workspace requires a non-empty adapter_id")
+        if not self.created_at.strip():
+            raise ValueError("Workspace requires created_at")
+
 
 @dataclass(frozen=True, slots=True)
 class Document:
     id: str
     source_name: str
     media_type: str
+    # 每个 Document 都必须归属一个 Workspace：没有「无归属」的文档。
+    workspace_id: str
 
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.source_name.strip():
             raise ValueError("Document requires a non-empty id and source_name")
+        if not self.workspace_id.strip():
+            raise ValueError("Document requires a non-empty workspace_id")
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,6 +4,7 @@ from pathlib import Path
 import uuid
 
 from tracegraph.core.contracts import (
+    DEFAULT_WORKSPACE_ID,
     Chunk,
     Document,
     DocumentVersion,
@@ -19,6 +20,18 @@ from tracegraph.ingestion.text import (
     read_text_document,
     split_text,
 )
+
+
+class UnknownWorkspaceError(ValueError):
+    """要写入的 Workspace 不存在。
+
+    继承 ValueError 是为了让既有的入参校验分支继续按「请求有问题」处理，
+    同时给调用方一个可以精确识别的类型。
+    """
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"Workspace 不存在：{workspace_id}")
+        self.workspace_id = workspace_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,20 +57,30 @@ class TextIngestionService:
         content = read_document_bytes(source_name, raw)
         return self.ingest_text(source_name, content)
 
-    def ingest_text(self, source_name: str, content: str) -> IngestionResult:
+    def ingest_text(
+        self,
+        source_name: str,
+        content: str,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+    ) -> IngestionResult:
         normalized_source = source_name.strip()
         if not normalized_source:
             raise ValueError("source_name 不能为空")
         if Path(normalized_source).suffix.lower() not in SUPPORTED_SUFFIXES:
             raise UnsupportedDocumentError(UNSUPPORTED_DOCUMENT_MESSAGE)
+        # 先确认归属再落库，否则会留下没有 Workspace 的 Document。
+        if self.repository.get_workspace(workspace_id) is None:
+            raise UnknownWorkspaceError(workspace_id)
 
         drafts = split_text(content, self.chunk_size)
-        document = self.repository.get_document_by_source(normalized_source)
+        document = self.repository.get_document_by_source(normalized_source, workspace_id)
         if document is None:
             document = Document(
-                id=_stable_id("doc", normalized_source.casefold()),
+                # Workspace 参与稳定 ID：不同 Workspace 的同名文件是不同的文档。
+                id=_stable_id("doc", workspace_id, normalized_source.casefold()),
                 source_name=normalized_source,
                 media_type=_media_type(normalized_source),
+                workspace_id=workspace_id,
             )
             self.repository.save_document(document)
 

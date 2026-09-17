@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tracegraph.core.contracts import IngestionStatus
+from tracegraph.core.contracts import DEFAULT_WORKSPACE_ID, IngestionStatus
 from tracegraph.ingestion.service import TextIngestionService
 from tracegraph.ingestion.text import UnsupportedDocumentError
 from tracegraph.storage.memory import InMemoryDocumentRepository
@@ -68,7 +68,7 @@ def test_heading_only_document_is_rejected() -> None:
     with pytest.raises(ValueError, match="没有可入库正文"):
         service.ingest_text("empty.md", "# 只有标题")
 
-    assert repository.get_document_by_source("empty.md") is None
+    assert repository.get_document_by_source("empty.md", DEFAULT_WORKSPACE_ID) is None
 
 
 def test_utf8_markdown_file_can_be_ingested() -> None:

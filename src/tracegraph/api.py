@@ -1,6 +1,7 @@
 import base64
 import binascii
 from collections.abc import Mapping
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 import sys
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from tracegraph import __version__
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ADAPTER_ID,
     MAX_HOPS,
     Answer,
     AnswerStatus,
@@ -28,6 +30,7 @@ from tracegraph.core.contracts import (
     GraphPath,
     IngestionJob,
     Relation,
+    Workspace,
 )
 from tracegraph.core.ports import (
     DocumentRepository,
@@ -107,6 +110,12 @@ class QueryRequest(BaseModel):
     max_hops: int = DEFAULT_MAX_HOPS
     # 不传表示用服务端默认模型；离线摘录固定为 "extractive"。
     generator_id: str | None = None
+
+
+class WorkspaceCreateRequest(BaseModel):
+    name: str
+    # 当前只有一个领域适配器，缺省即医疗；本阶段不做适配器动态加载。
+    adapter_id: str = DEFAULT_WORKSPACE_ADAPTER_ID
 
 
 class FeedbackRequest(BaseModel):
@@ -281,6 +290,36 @@ def create_app(
     def models() -> dict[str, object]:
         """可选生成器清单。刻意不含 base_url：它可能带凭证。"""
         return answer_service.registry.describe()
+
+    @application.post("/workspaces")
+    def create_workspace(request: WorkspaceCreateRequest) -> dict[str, str]:
+        name = request.name.strip()
+        if not name:
+            raise ApiError(400, "invalid_request", "name 不能为空。")
+        workspace = Workspace(
+            id=f"ws-{uuid.uuid4().hex}",
+            name=name,
+            adapter_id=request.adapter_id.strip() or DEFAULT_WORKSPACE_ADAPTER_ID,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        document_repository.save_workspace(workspace)
+        return _workspace_response(workspace)
+
+    @application.get("/workspaces")
+    def list_workspaces() -> dict[str, object]:
+        return {
+            "workspaces": [
+                _workspace_response(workspace)
+                for workspace in document_repository.list_workspaces()
+            ]
+        }
+
+    @application.get("/workspaces/{workspace_id}")
+    def get_workspace(workspace_id: str) -> dict[str, str]:
+        workspace = document_repository.get_workspace(workspace_id)
+        if workspace is None:
+            raise ApiError(404, "not_found", f"未找到 Workspace：{workspace_id}")
+        return _workspace_response(workspace)
 
     @application.get("/metrics")
     def metrics() -> dict[str, object]:
@@ -635,6 +674,15 @@ def _evidence_response(evidence: Evidence) -> dict[str, object]:
 
 def _entity_response(entity: Entity) -> dict[str, str]:
     return {"id": entity.id, "name": entity.name, "type": entity.type}
+
+
+def _workspace_response(workspace: Workspace) -> dict[str, str]:
+    return {
+        "id": workspace.id,
+        "name": workspace.name,
+        "adapter_id": workspace.adapter_id,
+        "created_at": workspace.created_at,
+    }
 
 
 def _relation_response(

@@ -1,6 +1,15 @@
+from datetime import UTC, datetime
 from threading import RLock
 
-from tracegraph.core.contracts import Chunk, Document, DocumentVersion, IngestionJob
+from tracegraph.core.contracts import (
+    DEFAULT_WORKSPACE_ADAPTER_ID,
+    DEFAULT_WORKSPACE_ID,
+    Chunk,
+    Document,
+    DocumentVersion,
+    IngestionJob,
+    Workspace,
+)
 
 
 class InMemoryDocumentRepository:
@@ -8,35 +17,81 @@ class InMemoryDocumentRepository:
 
     def __init__(self) -> None:
         self._lock = RLock()
+        self._workspaces: dict[str, Workspace] = {}
         self._documents: dict[str, Document] = {}
-        self._document_ids_by_source: dict[str, str] = {}
+        # 键是 (workspace_id, source_key)：来源只在 Workspace 内唯一。
+        self._document_ids_by_source: dict[tuple[str, str], str] = {}
         self._versions: dict[str, DocumentVersion] = {}
         self._version_ids_by_document: dict[str, list[str]] = {}
         self._chunks_by_version: dict[str, tuple[Chunk, ...]] = {}
         self._jobs: dict[str, IngestionJob] = {}
+        # 与 SQLite 实现一致：default Workspace 由存储层保证存在。
+        self._workspaces[DEFAULT_WORKSPACE_ID] = Workspace(
+            id=DEFAULT_WORKSPACE_ID,
+            name="默认工作区",
+            adapter_id=DEFAULT_WORKSPACE_ADAPTER_ID,
+            created_at=datetime.now(UTC).isoformat(),
+        )
 
-    def get_document_by_source(self, source_name: str) -> Document | None:
+    def save_workspace(self, workspace: Workspace) -> None:
         with self._lock:
-            document_id = self._document_ids_by_source.get(source_name.casefold())
+            if workspace.id in self._workspaces:
+                raise ValueError("Workspace 已存在")
+            self._workspaces[workspace.id] = workspace
+
+    def get_workspace(self, workspace_id: str) -> Workspace | None:
+        with self._lock:
+            return self._workspaces.get(workspace_id)
+
+    def list_workspaces(self) -> tuple[Workspace, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._workspaces.values(),
+                    key=lambda workspace: (workspace.created_at, workspace.id),
+                )
+            )
+
+    def get_document_by_source(
+        self, source_name: str, workspace_id: str
+    ) -> Document | None:
+        with self._lock:
+            document_id = self._document_ids_by_source.get(
+                (workspace_id, source_name.casefold())
+            )
             return self._documents.get(document_id) if document_id else None
 
     def get_document(self, document_id: str) -> Document | None:
         with self._lock:
             return self._documents.get(document_id)
 
-    def list_documents(self) -> tuple[Document, ...]:
+    def list_documents(self, workspace_id: str | None = None) -> tuple[Document, ...]:
         with self._lock:
+            documents = (
+                self._documents.values()
+                if workspace_id is None
+                else (
+                    document
+                    for document in self._documents.values()
+                    if document.workspace_id == workspace_id
+                )
+            )
             return tuple(
                 sorted(
-                    self._documents.values(),
+                    documents,
                     key=lambda document: (document.source_name.casefold(), document.id),
                 )
             )
 
     def save_document(self, document: Document) -> None:
+        key = (document.workspace_id, document.source_name.casefold())
         with self._lock:
+            existing = self._document_ids_by_source.get(key)
+            if existing is not None and existing != document.id:
+                # SQLite 侧由 UNIQUE(workspace_id, source_key) 拒绝，这里保持一致。
+                raise ValueError("同一 Workspace 中该来源已存在其他 Document")
             self._documents[document.id] = document
-            self._document_ids_by_source[document.source_name.casefold()] = document.id
+            self._document_ids_by_source[key] = document.id
             self._version_ids_by_document.setdefault(document.id, [])
 
     def delete_document(self, document_id: str) -> tuple[str, ...]:
@@ -44,7 +99,9 @@ class InMemoryDocumentRepository:
             document = self._documents.pop(document_id, None)
             if document is None:
                 return ()
-            self._document_ids_by_source.pop(document.source_name.casefold(), None)
+            self._document_ids_by_source.pop(
+                (document.workspace_id, document.source_name.casefold()), None
+            )
             version_ids = self._version_ids_by_document.pop(document_id, [])
             chunk_ids = tuple(
                 chunk.id

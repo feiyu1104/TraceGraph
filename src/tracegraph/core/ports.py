@@ -14,6 +14,7 @@ from tracegraph.core.contracts import (
     IngestionJob,
     Relation,
     TraversalDirection,
+    Workspace,
 )
 
 
@@ -37,11 +38,19 @@ class DomainAdapter(Protocol):
 class DocumentRepository(Protocol):
     """文档入库服务依赖的最小持久化接口。"""
 
-    def get_document_by_source(self, source_name: str) -> Document | None: ...
+    def save_workspace(self, workspace: Workspace) -> None: ...
+
+    def get_workspace(self, workspace_id: str) -> Workspace | None: ...
+
+    def list_workspaces(self) -> tuple[Workspace, ...]: ...
+
+    def get_document_by_source(
+        self, source_name: str, workspace_id: str
+    ) -> Document | None: ...
 
     def get_document(self, document_id: str) -> Document | None: ...
 
-    def list_documents(self) -> tuple[Document, ...]: ...
+    def list_documents(self, workspace_id: str | None = None) -> tuple[Document, ...]: ...
 
     def save_document(self, document: Document) -> None: ...
 

@@ -1,14 +1,20 @@
+from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 from threading import RLock
 
 from tracegraph.core.contracts import (
+    DEFAULT_WORKSPACE_ADAPTER_ID,
+    DEFAULT_WORKSPACE_ID,
     Chunk,
     Document,
     DocumentVersion,
     IngestionJob,
     IngestionStatus,
+    Workspace,
 )
+
+_DEFAULT_WORKSPACE_NAME = "默认工作区"
 
 
 class SQLiteDocumentRepository:
@@ -33,49 +39,94 @@ class SQLiteDocumentRepository:
     def __exit__(self, *args: object) -> None:
         self.close()
 
-    def get_document_by_source(self, source_name: str) -> Document | None:
+    def save_workspace(self, workspace: Workspace) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO workspaces (id, name, adapter_id, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    workspace.id,
+                    workspace.name,
+                    workspace.adapter_id,
+                    workspace.created_at,
+                ),
+            )
+
+    def get_workspace(self, workspace_id: str) -> Workspace | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT id, name, adapter_id, created_at FROM workspaces WHERE id = ?",
+                (workspace_id,),
+            ).fetchone()
+        return _workspace_from_row(row) if row else None
+
+    def list_workspaces(self) -> tuple[Workspace, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT id, name, adapter_id, created_at
+                FROM workspaces
+                ORDER BY created_at, id
+                """
+            ).fetchall()
+        return tuple(_workspace_from_row(row) for row in rows)
+
+    def get_document_by_source(
+        self, source_name: str, workspace_id: str
+    ) -> Document | None:
+        # 同名来源只在同一个 Workspace 内唯一，因此必须带上归属才能定位。
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT id, source_name, media_type
+                SELECT id, source_name, media_type, workspace_id
                 FROM documents
-                WHERE source_key = ?
+                WHERE workspace_id = ? AND source_key = ?
                 """,
-                (source_name.casefold(),),
+                (workspace_id, source_name.casefold()),
             ).fetchone()
         return _document_from_row(row) if row else None
 
     def get_document(self, document_id: str) -> Document | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT id, source_name, media_type FROM documents WHERE id = ?",
+                """
+                SELECT id, source_name, media_type, workspace_id
+                FROM documents
+                WHERE id = ?
+                """,
                 (document_id,),
             ).fetchone()
         return _document_from_row(row) if row else None
 
-    def list_documents(self) -> tuple[Document, ...]:
+    def list_documents(self, workspace_id: str | None = None) -> tuple[Document, ...]:
+        query = """
+            SELECT id, source_name, media_type, workspace_id
+            FROM documents
+        """
+        parameters: tuple[str, ...] = ()
+        if workspace_id is not None:
+            query += " WHERE workspace_id = ?"
+            parameters = (workspace_id,)
+        query += " ORDER BY source_key, id"
         with self._lock:
-            rows = self._connection.execute(
-                """
-                SELECT id, source_name, media_type
-                FROM documents
-                ORDER BY source_key, id
-                """
-            ).fetchall()
+            rows = self._connection.execute(query, parameters).fetchall()
         return tuple(_document_from_row(row) for row in rows)
 
     def save_document(self, document: Document) -> None:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO documents (id, source_name, source_key, media_type)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO documents (id, source_name, source_key, media_type, workspace_id)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     document.id,
                     document.source_name,
                     document.source_name.casefold(),
                     document.media_type,
+                    document.workspace_id,
                 ),
             )
 
@@ -258,11 +309,21 @@ class SQLiteDocumentRepository:
         with self._lock, self._connection:
             self._connection.executescript(
                 """
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+                    adapter_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY,
                     source_name TEXT NOT NULL,
-                    source_key TEXT NOT NULL UNIQUE,
-                    media_type TEXT NOT NULL
+                    source_key TEXT NOT NULL,
+                    media_type TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    -- 来源只在 Workspace 内唯一：不同 Workspace 允许存在同名文档。
+                    UNIQUE (workspace_id, source_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS document_versions (
@@ -293,6 +354,127 @@ class SQLiteDocumentRepository:
                 );
                 """
             )
+            self._adopt_documents_into_workspace()
+        with self._lock:
+            # 重建要开关外键，而外键开关在事务内不生效，因此必须在上面的写事务提交之后。
+            if not self._documents_schema_is_current():
+                self._rebuild_documents_table()
+
+    def _adopt_documents_into_workspace(self) -> None:
+        """给没有 Workspace 概念的既有库补上 workspace_id。
+
+        只做加法：ADD COLUMN 不重写表，既有文档、版本、切片和入库任务全部
+        原样保留；随后把每一行回填到 default Workspace，因此迁移完不会留下
+        归属不明的文档，也不需要清空任何数据。
+        """
+        self._connection.execute(
+            """
+            INSERT OR IGNORE INTO workspaces (id, name, adapter_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                DEFAULT_WORKSPACE_ID,
+                _DEFAULT_WORKSPACE_NAME,
+                DEFAULT_WORKSPACE_ADAPTER_ID,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(documents)")
+        }
+        if "workspace_id" not in columns:
+            # 非空列无法带子查询默认值，因此先加成可空列再回填。
+            self._connection.execute(
+                "ALTER TABLE documents ADD COLUMN workspace_id TEXT REFERENCES workspaces(id)"
+            )
+        self._connection.execute(
+            "UPDATE documents SET workspace_id = ? WHERE workspace_id IS NULL",
+            (DEFAULT_WORKSPACE_ID,),
+        )
+
+    def _documents_schema_is_current(self) -> bool:
+        """documents 是否已是「workspace_id 非空 + 来源仅在 Workspace 内唯一」。
+
+        既有的两步迁移（加列 → 重建）都会收敛到这一形态，所以这个判断同时
+        是「迁移做完了」的标志，使迁移可以重复执行。
+        """
+        columns = {
+            row["name"]: row
+            for row in self._connection.execute("PRAGMA table_info(documents)")
+        }
+        workspace_id = columns.get("workspace_id")
+        if workspace_id is None or not workspace_id["notnull"]:
+            return False
+        # 旧的全局唯一约束必须已经消失，否则跨 Workspace 的同名文档仍然写不进去。
+        return ("source_key",) not in self._unique_index_columns()
+
+    def _unique_index_columns(self) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            tuple(
+                column["name"]
+                for column in self._connection.execute(
+                    f'PRAGMA index_info("{index["name"]}")'
+                )
+            )
+            for index in self._connection.execute("PRAGMA index_list(documents)")
+            if index["unique"]
+        )
+
+    def _rebuild_documents_table(self) -> None:
+        """重建 documents 表，把 workspace_id 收紧为非空并改掉唯一约束。
+
+        SQLite 没有 DROP CONSTRAINT，改列约束只能重建表，因此按官方推荐的
+        顺序来：关外键 → 开事务 → 建新表 → 搬数据 → 删旧表 → 改名 → 校验
+        → 提交 → 恢复外键。全程一个事务，失败即整表回滚，不会留下半截数据。
+        """
+        self._connection.commit()  # 事务内关外键是空操作，先确保没有未提交事务
+        self._connection.execute("PRAGMA foreign_keys = OFF")
+        if self._connection.execute("PRAGMA foreign_keys").fetchone()[0]:
+            raise RuntimeError("无法在重建 documents 前关闭外键约束")
+        previous_isolation = self._connection.isolation_level
+        self._connection.isolation_level = None  # 事务边界改由下面显式控制
+        try:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute("DROP TABLE IF EXISTS documents_rebuild")
+                self._connection.execute(
+                    """
+                    CREATE TABLE documents_rebuild (
+                        id TEXT PRIMARY KEY,
+                        source_name TEXT NOT NULL,
+                        source_key TEXT NOT NULL,
+                        media_type TEXT NOT NULL,
+                        workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                        UNIQUE (workspace_id, source_key)
+                    )
+                    """
+                )
+                self._connection.execute(
+                    """
+                    INSERT INTO documents_rebuild (
+                        id, source_name, source_key, media_type, workspace_id
+                    )
+                    SELECT id, source_name, source_key, media_type, workspace_id
+                    FROM documents
+                    """
+                )
+                self._connection.execute("DROP TABLE documents")
+                self._connection.execute(
+                    "ALTER TABLE documents_rebuild RENAME TO documents"
+                )
+                broken = self._connection.execute("PRAGMA foreign_key_check").fetchall()
+                if broken:
+                    raise RuntimeError(
+                        f"documents 重建后出现 {len(broken)} 条失配的外键引用，已回滚"
+                    )
+                self._connection.execute("COMMIT")
+            except Exception:
+                self._connection.execute("ROLLBACK")
+                raise
+        finally:
+            self._connection.isolation_level = previous_isolation
+            self._connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _document_from_row(row: sqlite3.Row) -> Document:
@@ -300,6 +482,16 @@ def _document_from_row(row: sqlite3.Row) -> Document:
         id=row["id"],
         source_name=row["source_name"],
         media_type=row["media_type"],
+        workspace_id=row["workspace_id"],
+    )
+
+
+def _workspace_from_row(row: sqlite3.Row) -> Workspace:
+    return Workspace(
+        id=row["id"],
+        name=row["name"],
+        adapter_id=row["adapter_id"],
+        created_at=row["created_at"],
     )
 
 
