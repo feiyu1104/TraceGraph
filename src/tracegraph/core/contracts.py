@@ -396,3 +396,227 @@ class Feedback:
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.question.strip() or not self.created_at.strip():
             raise ValueError("Feedback requires id, question, and created_at")
+
+
+# ---------------------------------------------------------------------------
+# 候选知识：抽取阶段产出的、尚未经过人工审核的实体与关系。
+#
+# 候选与正式图谱是两套东西：候选全部带着证据来源躺在候选表里，只有经过
+# 审核之后才可能被发布。因此这里的每一条记录都强制要求至少一个真实 Chunk
+# 作为证据 —— 没有证据的候选进不了契约，也就没有渠道被写进数据库。
+# ---------------------------------------------------------------------------
+
+
+class ExtractionStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class CandidateStatus(StrEnum):
+    """候选知识的审核状态；抽取阶段只产生 pending。"""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class CandidateKind(StrEnum):
+    """一条证据关联指向的是候选实体还是候选关系。"""
+
+    ENTITY = "entity"
+    RELATION = "relation"
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionVocabulary:
+    """适配器为「不调用在线模型」的确定性抽取给出的章节词汇表。
+
+    它把文档自身的章节结构接到本领域声明的类型上：`subject_type` 是文档标题
+    （分块定位符的第一层）指向的实体类型，`sections` 把章节标题映射到
+    （实体类型, 关系类型）。领域词汇只出现在适配器里，抽取服务与提示词都不
+    认识任何一个具体章节名。
+
+    适配器不给词汇表（返回 None）表示该领域没有可确定抽取的章节约定，此时
+    摘录式抽取如实产出 0 条候选，而不是猜一个类型。
+    """
+
+    subject_type: str
+    sections: Mapping[str, tuple[str, str]]
+    # 一个章节里并列写多个条目时的分隔符。它和章节标题一样属于「这份领域的
+    # 文档长什么样」，因此由适配器给出，抽取服务不认识任何具体的分隔符。
+    separator: str = "、"
+
+    def __post_init__(self) -> None:
+        if not self.subject_type.strip():
+            raise ValueError("抽取词汇表必须给出 subject_type")
+        if not self.separator:
+            raise ValueError("抽取词汇表必须给出一个非空的分隔符")
+        object.__setattr__(self, "sections", MappingProxyType(dict(self.sections)))
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionRun:
+    """一次抽取任务；候选知识全部挂在这条记录下。"""
+
+    id: str
+    workspace_id: str
+    document_id: str
+    document_version_id: str
+    adapter_id: str
+    model_id: str
+    status: ExtractionStatus
+    created_at: str
+    updated_at: str
+    entity_count: int = 0
+    relation_count: int = 0
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        required = {
+            "id": self.id,
+            "workspace_id": self.workspace_id,
+            "document_id": self.document_id,
+            "document_version_id": self.document_version_id,
+            "adapter_id": self.adapter_id,
+            "model_id": self.model_id,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        missing = [name for name, value in required.items() if not value.strip()]
+        if missing:
+            raise ValueError(
+                f"ExtractionRun requires non-empty fields: {', '.join(missing)}"
+            )
+        if min(self.entity_count, self.relation_count) < 0:
+            raise ValueError("候选计数不能为负")
+        if self.status is ExtractionStatus.FAILED and not (self.error or "").strip():
+            raise ValueError("失败的抽取任务必须给出原因")
+
+
+def _require_candidate_scope(
+    *,
+    candidate_id: str,
+    extraction_run_id: str,
+    workspace_id: str,
+    document_id: str,
+    document_version_id: str,
+    adapter_id: str,
+    candidate_type: str,
+    evidence_chunk_ids: tuple[str, ...],
+    created_at: str,
+    updated_at: str,
+) -> None:
+    """候选实体与候选关系共用的必填项与证据校验。
+
+    证据非空在这里是硬约束，而不是靠调用方自觉：契约层就拒绝了没有来源的
+    候选知识，抽取服务与存储层因此都不可能把它保存下来。
+    """
+    required = {
+        "id": candidate_id,
+        "extraction_run_id": extraction_run_id,
+        "workspace_id": workspace_id,
+        "document_id": document_id,
+        "document_version_id": document_version_id,
+        "adapter_id": adapter_id,
+        "type": candidate_type,
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+    missing = [name for name, value in required.items() if not value.strip()]
+    if missing:
+        raise ValueError(f"候选知识 requires non-empty fields: {', '.join(missing)}")
+    if not evidence_chunk_ids:
+        raise ValueError("候选知识必须至少关联一个真实 Chunk 作为证据")
+    if not all(chunk_id.strip() for chunk_id in evidence_chunk_ids):
+        raise ValueError("候选知识的证据 Chunk ID 不能为空")
+    if len(set(evidence_chunk_ids)) != len(evidence_chunk_ids):
+        raise ValueError("候选知识的证据 Chunk 不能重复")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateEntity:
+    id: str
+    extraction_run_id: str
+    workspace_id: str
+    document_id: str
+    document_version_id: str
+    adapter_id: str
+    name: str
+    # 去重用的规范化名称（折叠空白、去首尾标点、大小写归一）。
+    normalized_name: str
+    type: str
+    evidence_chunk_ids: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    status: CandidateStatus = CandidateStatus.PENDING
+
+    def __post_init__(self) -> None:
+        _require_candidate_scope(
+            candidate_id=self.id,
+            extraction_run_id=self.extraction_run_id,
+            workspace_id=self.workspace_id,
+            document_id=self.document_id,
+            document_version_id=self.document_version_id,
+            adapter_id=self.adapter_id,
+            candidate_type=self.type,
+            evidence_chunk_ids=self.evidence_chunk_ids,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+        if not self.name.strip() or not self.normalized_name.strip():
+            raise ValueError("候选实体必须有非空名称")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRelation:
+    id: str
+    extraction_run_id: str
+    workspace_id: str
+    document_id: str
+    document_version_id: str
+    adapter_id: str
+    # 两端都是同一次抽取里的候选实体 ID：关系的端点不可能是别的东西。
+    source_entity_id: str
+    target_entity_id: str
+    type: str
+    evidence_chunk_ids: tuple[str, ...]
+    created_at: str
+    updated_at: str
+    status: CandidateStatus = CandidateStatus.PENDING
+
+    def __post_init__(self) -> None:
+        _require_candidate_scope(
+            candidate_id=self.id,
+            extraction_run_id=self.extraction_run_id,
+            workspace_id=self.workspace_id,
+            document_id=self.document_id,
+            document_version_id=self.document_version_id,
+            adapter_id=self.adapter_id,
+            candidate_type=self.type,
+            evidence_chunk_ids=self.evidence_chunk_ids,
+            created_at=self.created_at,
+            updated_at=self.updated_at,
+        )
+        if not self.source_entity_id.strip() or not self.target_entity_id.strip():
+            raise ValueError("候选关系必须给出两端的候选实体")
+        if self.source_entity_id == self.target_entity_id:
+            raise ValueError("候选关系不允许自环")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateEvidence:
+    """一条「候选 ← 真实 Chunk」的证据关联。
+
+    实体证据与关系证据共用这一种形状，分别存在两张表里。`chunk_id` 指向
+    `chunks` 表，因此数据库层面也拒绝关联到不存在的 Chunk。
+    """
+
+    candidate_id: str
+    candidate_kind: CandidateKind
+    chunk_id: str
+
+    def __post_init__(self) -> None:
+        if not self.candidate_id.strip() or not self.chunk_id.strip():
+            raise ValueError("证据关联必须给出候选 ID 与 Chunk ID")

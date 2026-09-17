@@ -23,9 +23,13 @@ from tracegraph.core.contracts import (
     MAX_HOPS,
     Answer,
     AnswerStatus,
+    CandidateEntity,
+    CandidateRelation,
+    CandidateStatus,
     EvaluationCase,
     Evidence,
     Entity,
+    ExtractionRun,
     Feedback,
     FeedbackKind,
     GraphPath,
@@ -34,6 +38,7 @@ from tracegraph.core.contracts import (
     Workspace,
 )
 from tracegraph.core.ports import (
+    CandidateRepository,
     DocumentRepository,
     DomainAdapter,
     FeedbackRepository,
@@ -47,14 +52,21 @@ from tracegraph.domains.registry import (
     UnknownAdapterError,
     build_default_adapter_registry,
 )
+from tracegraph.extraction.providers import ExtractionError
+from tracegraph.extraction.service import ExtractionService
 from tracegraph.feedback.service import FeedbackService
 from tracegraph.feedback.storage import InMemoryFeedbackRepository
 from tracegraph.generation.models import (
     ModelRegistry,
     UnknownGeneratorError,
     UnavailableGeneratorError,
+    single_generator_registry,
 )
-from tracegraph.generation.providers import AnswerGenerator, relation_label
+from tracegraph.generation.providers import (
+    AnswerGenerator,
+    ExtractiveAnswerGenerator,
+    relation_label,
+)
 from tracegraph.generation.service import AnswerService
 from tracegraph.ingestion.service import (
     IngestionResult,
@@ -65,6 +77,7 @@ from tracegraph.ingestion.lifecycle import DocumentLifecycleService
 from tracegraph.ingestion.text import UnsupportedDocumentError
 from tracegraph.observability import RequestMetrics
 from tracegraph.retrieval.keyword import KeywordRetriever
+from tracegraph.storage.candidates import InMemoryCandidateRepository
 from tracegraph.storage.memory import InMemoryDocumentRepository
 
 
@@ -149,6 +162,19 @@ class PromoteFeedbackRequest(BaseModel):
     expected_status: AnswerStatus
 
 
+class ExtractionRequest(BaseModel):
+    """启动一次抽取。
+
+    文档按 ID 或版本 ID 指定（给版本 ID 时不会顺带抽到这个文档的其他版本）；
+    两者都不给则报 400。`model_id` 不传表示用服务端默认模型。
+    """
+
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    document_id: str | None = None
+    document_version_id: str | None = None
+    model_id: str | None = None
+
+
 def create_app(
     repository: DocumentRepository | None = None,
     retriever: Retriever | None = None,
@@ -162,6 +188,7 @@ def create_app(
     model_registry: ModelRegistry | None = None,
     original_store: OriginalDocumentStore | None = None,
     adapter_registry: AdapterRegistry | None = None,
+    candidate_repository: CandidateRepository | None = None,
 ) -> FastAPI:
     document_repository = (
         repository if repository is not None else InMemoryDocumentRepository()
@@ -185,8 +212,21 @@ def create_app(
     max_upload_bytes = load_max_upload_bytes()
     active_feedback_repository = feedback_repository or InMemoryFeedbackRepository()
     feedback_service = FeedbackService(active_feedback_repository)
+    # 没有模型注册表时退回「当前生成器就是唯一可选项」的退化形态：候选抽取
+    # 因此不会因为缺少模型配置而整个不可用。
+    active_models = model_registry or single_generator_registry(
+        answer_generator or ExtractiveAnswerGenerator()
+    )
+    active_candidates = candidate_repository or InMemoryCandidateRepository()
+    # 抽取服务只认识文档仓储、适配器注册表、候选仓储与模型注册表。它拿不到
+    # 图仓储 —— 候选没有任何路径可以写进正式图谱。
+    extraction_service = ExtractionService(
+        document_repository, known_adapters, active_candidates, active_models
+    )
+    # 删除文档时一并清掉它的抽取任务与候选：候选的证据关联引用 Chunk，先删
+    # 候选才轮得到 Chunk。
     lifecycle_service = DocumentLifecycleService(
-        document_repository, graph_repository, original_store
+        document_repository, graph_repository, original_store, active_candidates
     )
     request_metrics = RequestMetrics()
     application = FastAPI(
@@ -567,6 +607,80 @@ def create_app(
             retriever=retriever.name,
         )
 
+    @application.post("/extractions")
+    def start_extraction(request: ExtractionRequest) -> dict[str, object]:
+        """启动一次候选抽取。本批只产出候选，不写正式图谱。"""
+        try:
+            run = extraction_service.start(
+                request.workspace_id,
+                document_id=request.document_id,
+                document_version_id=request.document_version_id,
+                model_id=request.model_id,
+            )
+        except UnknownGeneratorError as error:
+            raise ApiError(400, "invalid_generator", str(error)) from error
+        except UnavailableGeneratorError as error:
+            raise ApiError(503, "generator_unavailable", str(error)) from error
+        except ExtractionError as error:
+            raise ApiError(error.status_code, error.error_code, str(error)) from error
+        return _run_response(run)
+
+    @application.get("/extractions/{run_id}")
+    def get_extraction(run_id: str) -> dict[str, object]:
+        run = active_candidates.get_run(run_id)
+        if run is None:
+            raise ApiError(404, "not_found", f"未找到抽取任务：{run_id}")
+        return _run_response(run)
+
+    @application.get("/extractions/{run_id}/candidates")
+    def get_extraction_candidates(run_id: str) -> dict[str, object]:
+        """候选实体与候选关系，各自带上证据 Chunk 的原文片段。"""
+        run = active_candidates.get_run(run_id)
+        if run is None:
+            raise ApiError(404, "not_found", f"未找到抽取任务：{run_id}")
+        return _candidates_payload(
+            run,
+            active_candidates.list_entities(run_id),
+            active_candidates.list_relations(run_id),
+            document_repository,
+        )
+
+    @application.get("/workspaces/{workspace_id}/candidates")
+    def list_workspace_candidates(
+        workspace_id: str,
+        document_id: str | None = QueryParam(default=None),
+        status: CandidateStatus | None = QueryParam(default=None),
+        entity_type: str | None = QueryParam(default=None),
+        relation_type: str | None = QueryParam(default=None),
+    ) -> dict[str, object]:
+        """按文档、状态与类型筛选候选。
+
+        Workspace 是硬条件：查询只在这个 Workspace 的候选里进行，别的
+        Workspace 的候选一条也读不到。
+        """
+        workspace = _require_workspace(document_repository, workspace_id)
+        return {
+            "workspace_id": workspace.id,
+            "entities": [
+                _candidate_entity_response(entity, document_repository)
+                for entity in active_candidates.list_workspace_entities(
+                    workspace.id,
+                    document_id=document_id,
+                    status=status,
+                    entity_type=entity_type,
+                )
+            ],
+            "relations": [
+                _candidate_relation_response(relation, document_repository)
+                for relation in active_candidates.list_workspace_relations(
+                    workspace.id,
+                    document_id=document_id,
+                    status=status,
+                    relation_type=relation_type,
+                )
+            ],
+        }
+
     @application.post("/feedback")
     def submit_feedback(request: FeedbackRequest) -> dict[str, object]:
         try:
@@ -772,6 +886,104 @@ def _chunk_evidence(
             }
         )
     return resolved
+
+
+def _run_response(run: ExtractionRun) -> dict[str, object]:
+    return {
+        "id": run.id,
+        "workspace_id": run.workspace_id,
+        "document_id": run.document_id,
+        "document_version_id": run.document_version_id,
+        "adapter_id": run.adapter_id,
+        "model_id": run.model_id,
+        "status": run.status.value,
+        "entity_count": run.entity_count,
+        "relation_count": run.relation_count,
+        "error": run.error,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+    }
+
+
+def _candidate_evidence(
+    document_repository: DocumentRepository, chunk_ids: tuple[str, ...]
+) -> list[dict[str, object]]:
+    """候选的证据 Chunk 原文。与关系证据同一种形状，前端不必维护两套渲染。"""
+    resolved = []
+    for chunk_id in chunk_ids:
+        chunk = document_repository.get_chunk(chunk_id)
+        if chunk is None:
+            continue
+        document = document_repository.get_document(chunk.document_id)
+        resolved.append(
+            {
+                "chunk_id": chunk.id,
+                "content": chunk.content,
+                "source_name": document.source_name if document else "",
+                "locator": chunk.locator,
+            }
+        )
+    return resolved
+
+
+def _candidate_entity_response(
+    entity: CandidateEntity, document_repository: DocumentRepository
+) -> dict[str, object]:
+    return {
+        "id": entity.id,
+        "extraction_run_id": entity.extraction_run_id,
+        "document_id": entity.document_id,
+        "document_version_id": entity.document_version_id,
+        "adapter_id": entity.adapter_id,
+        "name": entity.name,
+        "type": entity.type,
+        "status": entity.status.value,
+        "evidence": _candidate_evidence(
+            document_repository, entity.evidence_chunk_ids
+        ),
+        "created_at": entity.created_at,
+        "updated_at": entity.updated_at,
+    }
+
+
+def _candidate_relation_response(
+    relation: CandidateRelation, document_repository: DocumentRepository
+) -> dict[str, object]:
+    return {
+        "id": relation.id,
+        "extraction_run_id": relation.extraction_run_id,
+        "document_id": relation.document_id,
+        "document_version_id": relation.document_version_id,
+        "adapter_id": relation.adapter_id,
+        "source_entity_id": relation.source_entity_id,
+        "target_entity_id": relation.target_entity_id,
+        "type": relation.type,
+        "status": relation.status.value,
+        "evidence": _candidate_evidence(
+            document_repository, relation.evidence_chunk_ids
+        ),
+        "created_at": relation.created_at,
+        "updated_at": relation.updated_at,
+    }
+
+
+def _candidates_payload(
+    run: ExtractionRun,
+    entities: tuple[CandidateEntity, ...],
+    relations: tuple[CandidateRelation, ...],
+    document_repository: DocumentRepository,
+) -> dict[str, object]:
+    return {
+        "run": _run_response(run),
+        "entities": [
+            _candidate_entity_response(entity, document_repository)
+            for entity in entities
+        ],
+        "relations": [
+            _candidate_relation_response(relation, document_repository)
+            for relation in relations
+        ],
+    }
 
 
 def _graph_path_response(path: GraphPath | None) -> dict[str, object] | None:

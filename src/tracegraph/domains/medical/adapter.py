@@ -1,7 +1,24 @@
 from dataclasses import dataclass
 
-from tracegraph.core.contracts import AnswerStatus
+from tracegraph.core.contracts import AnswerStatus, ExtractionVocabulary
 
+
+# 确定性摘录式抽取的章节词汇表：章节标题取自 DUTMed 记录转成 Markdown 时的
+# 标题（与 domains/medical/importer.py 的字段表一致）。这些词只出现在适配器
+# 里 —— 抽取服务与提示词都不认识任何一个具体章节名。
+_MEDICAL_SECTIONS = {
+    "分类": ("Category", "BELONGS_TO"),
+    "症状": ("Symptom", "HAS_SYMPTOM"),
+    "并发症": ("Disease", "ACCOMPANIES"),
+    "就诊科室": ("Department", "TREATED_BY"),
+    "治疗方式": ("Treatment", "USES_TREATMENT"),
+    "检查": ("Check", "REQUIRES_CHECK"),
+    "推荐药物": ("Drug", "RECOMMENDS_DRUG"),
+    "常用药物": ("Drug", "COMMONLY_USES_DRUG"),
+    "宜吃": ("Food", "SHOULD_EAT"),
+    "忌吃": ("Food", "SHOULD_NOT_EAT"),
+    "推荐食谱": ("Recipe", "RECOMMENDS_RECIPE"),
+}
 
 _EMERGENCY_SIGNALS = {
     "胸痛": ("胸痛", "胸口剧痛", "胸部压榨感"),
@@ -48,6 +65,18 @@ class MedicalDomainAdapter:
             "SHOULD_EAT",
             "SHOULD_NOT_EAT",
             "RECOMMENDS_RECIPE",
+        )
+
+    def extraction_vocabulary(self) -> ExtractionVocabulary:
+        """DUTMed 记录每一条都按「疾病名 > 章节」组织，主体是疾病。
+
+        章节里的多个条目用顿号并列，这一点和章节标题一样来自 DUTMed 记录的
+        写法，因此放在适配器里，而不是让抽取服务去猜。
+        """
+        return ExtractionVocabulary(
+            subject_type="Disease",
+            sections=_MEDICAL_SECTIONS,
+            separator="、",
         )
 
     def normalize_question(self, question: str) -> str:

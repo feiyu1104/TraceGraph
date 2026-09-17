@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from tracegraph.core.contracts import AnswerStatus
+from tracegraph.core.contracts import AnswerStatus, ExtractionVocabulary
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +26,10 @@ class PersonalNotesDomainAdapter:
             "MENTIONS",
             "OCCURRED_AT",
         )
+
+    def extraction_vocabulary(self) -> ExtractionVocabulary | None:
+        """笔记的章节写法因人而异，没有可依赖的约定，因此不猜类型。"""
+        return None
 
     def normalize_question(self, question: str) -> str:
         return " ".join(question.strip().split())

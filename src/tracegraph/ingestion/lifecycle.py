@@ -1,4 +1,5 @@
 from tracegraph.core.ports import (
+    CandidateRepository,
     DocumentRepository,
     GraphRepository,
     OriginalDocumentStore,
@@ -11,10 +12,12 @@ class DocumentLifecycleService:
         documents: DocumentRepository,
         graph: GraphRepository | None = None,
         originals: OriginalDocumentStore | None = None,
+        candidates: CandidateRepository | None = None,
     ) -> None:
         self.documents = documents
         self.graph = graph
         self.originals = originals
+        self.candidates = candidates
 
     def delete(self, document_id: str) -> tuple[str, ...]:
         document = self.documents.get_document(document_id)
@@ -28,6 +31,9 @@ class DocumentLifecycleService:
         )
         if self.graph is not None:
             self.graph.remove_evidence(chunk_ids)
+        if self.candidates is not None:
+            # 必须在 Chunk 之前删：候选的证据关联引用 chunks，反过来会先撞上外键。
+            self.candidates.delete_document(document_id)
         deleted_chunk_ids = self.documents.delete_document(document_id)
         if set(deleted_chunk_ids) != set(chunk_ids):
             raise RuntimeError("文档删除结果与预期 Chunk 不一致")

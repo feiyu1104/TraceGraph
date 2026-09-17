@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import json
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -63,6 +63,18 @@ class AnswerGenerator(Protocol):
     ) -> GeneratedAnswer: ...
 
 
+@runtime_checkable
+class ChatCompleter(Protocol):
+    """按「系统提示 + 用户提示」调用一次对话补全的最小接口。
+
+    候选抽取与问答共用同一个模型条目：注册表解析出来的生成器同时提供
+    `complete`，因此「用哪个模型抽取」与「用哪个模型回答」是同一个取值域，
+    也不需要把地址和密钥从生成器里搬出来。
+    """
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str: ...
+
+
 class ExtractiveAnswerGenerator:
     name = "extractive"
     # 离线摘录不经过任何模型网关，因此没有模型名可报。
@@ -103,16 +115,17 @@ class OpenAICompatibleAnswerGenerator:
     def generate(
         self, question: str, evidences: tuple[Evidence, ...]
     ) -> GeneratedAnswer:
-        content = self._complete(question, evidences)
-        return _validated_answer(_decode_content_json(content), evidences)
+        content = self.complete(_SYSTEM_PROMPT, _user_prompt(question, evidences))
+        return _validated_answer(decode_content_json(content), evidences)
 
-    def _complete(self, question: str, evidences: tuple[Evidence, ...]) -> str:
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """一次对话补全。提示词由调用方给出，本方法不拼任何业务内容。"""
         body = json.dumps(
             {
                 "model": self.model,
                 "messages": [
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": _user_prompt(question, evidences)},
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
                 ],
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"},
@@ -199,7 +212,8 @@ def _extract_message_content(payload: object) -> str:
     return content
 
 
-def _decode_content_json(content: str) -> dict[str, object]:
+def decode_content_json(content: str) -> dict[str, object]:
+    """把模型返回的内容解成 JSON 对象；问答与候选抽取共用这一处解析。"""
     try:
         parsed = json.loads(_strip_code_fence(content))
     except json.JSONDecodeError as error:

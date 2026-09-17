@@ -19,6 +19,7 @@ from tracegraph.graph_backend import create_graph_repository
 from tracegraph.retrieval.graph import GraphRetriever
 from tracegraph.retrieval.hybrid import HybridRetriever
 from tracegraph.retrieval.keyword import KeywordRetriever
+from tracegraph.storage.candidates import SQLiteCandidateRepository
 from tracegraph.storage.originals import (
     FileSystemOriginalStore,
     load_original_store_root,
@@ -44,6 +45,9 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
             file=sys.stderr,
         )
     feedback = SQLiteFeedbackRepository(database_path)
+    # 与文档、反馈一样是同一个库文件上的独立仓储：候选表由它自己幂等迁移，
+    # 不会改动既有表。
+    candidates = SQLiteCandidateRepository(database_path)
     retriever = HybridRetriever(
         (KeywordRetriever(documents), GraphRetriever(documents, graph))
     )
@@ -60,6 +64,7 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
         generation_status=registry.system_status(fallback_name),
         original_store=originals,
         adapter_registry=build_default_adapter_registry(),
+        candidate_repository=candidates,
     )
 
 

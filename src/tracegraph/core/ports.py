@@ -4,11 +4,17 @@ from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
     DEFAULT_WORKSPACE_ID,
     AnswerStatus,
+    CandidateEntity,
+    CandidateEvidence,
+    CandidateRelation,
+    CandidateStatus,
     Chunk,
     Document,
     DocumentVersion,
     Entity,
     Evidence,
+    ExtractionRun,
+    ExtractionVocabulary,
     Feedback,
     FrontierExpansion,
     GraphStatistics,
@@ -28,6 +34,15 @@ class DomainAdapter(Protocol):
     def entity_types(self) -> tuple[str, ...]: ...
 
     def relation_types(self) -> tuple[str, ...]: ...
+
+    def extraction_vocabulary(self) -> ExtractionVocabulary | None:
+        """确定性摘录式抽取的章节词汇表。
+
+        这是「不调用任何在线模型时怎么抽取」的领域差异所在：章节标题到类型
+        的对应关系属于领域知识，因此只能由适配器给出，抽取服务里没有任何
+        一个具体领域的词。返回 None 表示这个领域没有可确定抽取的章节约定。
+        """
+        ...
 
     def normalize_question(self, question: str) -> str: ...
 
@@ -196,6 +211,61 @@ class GraphRepository(Protocol):
     def remove_evidence(self, chunk_ids: tuple[str, ...]) -> None: ...
 
     def delete_outgoing_relations(self, entity_id: str) -> None: ...
+
+
+class CandidateRepository(Protocol):
+    """候选知识的最小持久化接口。
+
+    候选只落在候选表里，本接口也没有任何通往图后端的路径：未经审核的候选
+    不允许进入正式图谱，因此「抽取即发布」在装配层面就不可能发生。
+    """
+
+    def save_run(self, run: ExtractionRun) -> None:
+        """写入或更新一条抽取任务（状态、计数与失败原因）。"""
+        ...
+
+    def save_extraction(
+        self,
+        run: ExtractionRun,
+        entities: tuple[CandidateEntity, ...],
+        relations: tuple[CandidateRelation, ...],
+    ) -> None:
+        """把一次抽取的全部产物作为一个事务写入。
+
+        候选、证据关联与任务终态同进同退：失败时整批回滚，不会留下
+        「候选已入库、状态还停在 running」的半批数据。
+        """
+        ...
+
+    def get_run(self, run_id: str) -> ExtractionRun | None: ...
+
+    def list_entities(self, run_id: str) -> tuple[CandidateEntity, ...]: ...
+
+    def list_relations(self, run_id: str) -> tuple[CandidateRelation, ...]: ...
+
+    def list_evidence(self, run_id: str) -> tuple[CandidateEvidence, ...]: ...
+
+    def list_workspace_entities(
+        self,
+        workspace_id: str,
+        *,
+        document_id: str | None = None,
+        status: CandidateStatus | None = None,
+        entity_type: str | None = None,
+    ) -> tuple[CandidateEntity, ...]: ...
+
+    def list_workspace_relations(
+        self,
+        workspace_id: str,
+        *,
+        document_id: str | None = None,
+        status: CandidateStatus | None = None,
+        relation_type: str | None = None,
+    ) -> tuple[CandidateRelation, ...]: ...
+
+    def delete_document(self, document_id: str) -> None:
+        """删除该文档名下的抽取任务与全部候选数据。"""
+        ...
 
 
 class FeedbackRepository(Protocol):

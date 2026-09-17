@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from tracegraph.core.contracts import AnswerStatus
+from tracegraph.core.contracts import AnswerStatus, ExtractionVocabulary
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +34,10 @@ class GeneralDomainAdapter:
             "LOCATED_IN",
             "OCCURRED_AT",
         )
+
+    def extraction_vocabulary(self) -> ExtractionVocabulary | None:
+        """通用资料没有固定的章节约定，不猜类型：摘录式抽取如实产出 0 条候选。"""
+        return None
 
     def normalize_question(self, question: str) -> str:
         return " ".join(question.strip().split())
