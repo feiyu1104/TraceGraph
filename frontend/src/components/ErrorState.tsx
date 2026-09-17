@@ -12,6 +12,10 @@ const HINTS: Record<string, string> = {
   generator_unavailable:
     '所选模型当前不可用（通常是缺少对应的环境变量），请换一个模型或改用离线摘录。',
   file_too_large: '文件超过服务端允许的大小，请拆分后重试。',
+  invalid_adapter: '这个适配器 ID 不在服务端注册表里，请从清单里重新选择。',
+  workspace_adapter_unavailable:
+    '该知识库记录的适配器当前不可用（不在服务端注册表里），请换一个知识库；适配器不能由前端改写。',
+  workspace_not_found: '这个知识库不存在，请重新选择。',
   unsupported_document: '当前不支持这种文档格式，请改用 TXT、Markdown、JSON、JSONL、CSV 或文本型 PDF。',
 }
 

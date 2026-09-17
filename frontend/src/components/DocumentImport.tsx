@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 
 import {
   ApiRequestError,
-  fetchSystem,
   SUPPORTED_UPLOAD_SUFFIXES,
   uploadDocument,
 } from '../api/client'
@@ -32,33 +31,32 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(2)} MiB`
 }
 
-export default function DocumentImport() {
+interface DocumentImportProps {
+  /** 本次上传进入哪个知识库；由页面当前选择决定，不是组件自己的状态。 */
+  workspaceId: string
+  workspaceName: string
+  /** 服务端生效的上传上限；页面已经从 /system 拿到，组件不重复请求。 */
+  maxUploadBytes: number | null
+  /** 上传忙状态上报给页面，用于在上传期间锁住知识库切换。 */
+  onBusyChange: (busy: boolean) => void
+}
+
+export default function DocumentImport({
+  workspaceId,
+  workspaceName,
+  maxUploadBytes,
+  onBusyChange,
+}: DocumentImportProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [file, setFile] = useState<File | null>(null)
   const [localError, setLocalError] = useState<string | null>(null)
   const [requestError, setRequestError] = useState<ApiRequestError | null>(null)
   const [result, setResult] = useState<IngestionResult | null>(null)
   const [busy, setBusy] = useState(false)
-  // 上限只认服务端给的值，前端不再自己维护一份常量。读不到就不预检 ——
-  // 这个检查只是省掉一次注定失败的上传，后端始终按真实字节数复检。
-  const [maxUploadBytes, setMaxUploadBytes] = useState<number | null>(null)
 
   useEffect(() => {
-    let cancelled = false
-    fetchSystem()
-      .then((info) => {
-        if (cancelled) return
-        if (typeof info.max_upload_bytes === 'number') {
-          setMaxUploadBytes(info.max_upload_bytes)
-        }
-      })
-      .catch(() => {
-        // 读不到上限不影响上传：后端仍会独立判定并返回 413。
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    onBusyChange(busy)
+  }, [busy, onBusyChange])
 
   function pick(selected: File | null) {
     setResult(null)
@@ -81,7 +79,7 @@ export default function DocumentImport() {
     setRequestError(null)
     setResult(null)
     try {
-      setResult(await uploadDocument(file))
+      setResult(await uploadDocument(file, workspaceId))
     } catch (error) {
       setRequestError(
         error instanceof ApiRequestError
@@ -100,6 +98,10 @@ export default function DocumentImport() {
 
   return (
     <div className="importer">
+      <p className="importer__target">
+        文档将进入：<strong>{workspaceName}</strong>
+      </p>
+
       <label className="field">
         <span className="field__label">选择文档</span>
         <input
@@ -152,6 +154,10 @@ export default function DocumentImport() {
             {result.document.source_name}
           </p>
           <dl className="metrics">
+            <div>
+              <dt>知识库</dt>
+              <dd>{workspaceName}</dd>
+            </div>
             <div>
               <dt>文档 ID</dt>
               <dd>{result.document.id}</dd>

@@ -23,6 +23,10 @@ interface QuestionFormProps {
   busy: boolean
   /** 模型选择器；与跳数一样属于「这次怎么问」，因此放在问题输入区。 */
   modelSelector?: ReactNode
+  /** 只有走混合检索的知识库才有多跳，其余知识库把跳数选择整体禁用。 */
+  multiHopEnabled: boolean
+  /** 禁用多跳的原因，直接显示在跳数区下方；可用时为 null。 */
+  retrievalNotice: string | null
 }
 
 export default function QuestionForm({
@@ -34,6 +38,8 @@ export default function QuestionForm({
   onClear,
   busy,
   modelSelector,
+  multiHopEnabled,
+  retrievalNotice,
 }: QuestionFormProps) {
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     // Enter 直接查询，Shift+Enter 换行 —— 键盘用户不必去点按钮。
@@ -66,7 +72,7 @@ export default function QuestionForm({
 
       {modelSelector}
 
-      <fieldset className="hops">
+      <fieldset className="hops" disabled={!multiHopEnabled}>
         <legend className="field__label">检索跳数</legend>
         <div className="hops__options">
           {HOP_OPTIONS.map((option) => (
@@ -86,6 +92,7 @@ export default function QuestionForm({
             </label>
           ))}
         </div>
+        {retrievalNotice && <p className="hops__notice">{retrievalNotice}</p>}
       </fieldset>
 
       <div className="question__actions">

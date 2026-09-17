@@ -82,6 +82,14 @@ textarea {
   font-size: var(--text-lg);
 }
 
+/* 面板暂时没有内容可展示时，说明为什么，而不是留白或伪造一张空图。 */
+.panel__note {
+  max-width: var(--measure);
+  color: var(--ink-500);
+  font-size: var(--text-sm);
+  line-height: 1.8;
+}
+
 .meta {
   color: var(--ink-500);
   font-size: var(--text-sm);

@@ -107,6 +107,89 @@
   color: var(--amber-800);
 }
 
+/* ---------- 知识库选择 ---------- */
+/* 单独一条横条：它同时管查询与上传，放在任何一栏里都会让归属看起来只覆盖半页。 */
+
+.workspace-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 1280px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 0 var(--space-5);
+}
+
+.workspace-bar__main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green-600);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.workspace-bar__field {
+  min-width: 18rem;
+}
+
+.workspace-bar__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.workspace-bar__notice {
+  max-width: var(--measure);
+  color: var(--ink-500);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+}
+
+.workspace-bar__notice--warn {
+  color: var(--amber-800);
+}
+
+.workspace-bar__notice--ok {
+  color: var(--green-700);
+}
+
+.workspace-create {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-quiet);
+}
+
+.workspace-create .field__input {
+  max-width: 24rem;
+}
+
+.workspace-create__hint {
+  max-width: var(--measure);
+  color: var(--ink-400);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+}
+
+.workspace-create__hint--warn {
+  color: var(--amber-800);
+}
+
+.workspace-create__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
 /* ---------- 主栅格：桌面双栏，窄屏单栏 ---------- */
 
 .app__grid {
@@ -188,6 +271,23 @@
 .hops__hint {
   color: var(--ink-400);
   font-size: var(--text-xs);
+}
+
+/* 跳数在只走关键词检索的知识库里整体不可用；说明由 .hops__notice 给出。 */
+.hops[disabled] .hops__options {
+  opacity: 0.5;
+}
+
+.hops[disabled] .hops__option {
+  cursor: not-allowed;
+}
+
+.hops__notice {
+  margin-top: var(--space-2);
+  max-width: var(--measure);
+  color: var(--amber-800);
+  font-size: var(--text-xs);
+  line-height: 1.7;
 }
 
 .models {
@@ -683,6 +783,15 @@
   font-size: var(--text-sm);
 }
 
+.importer__target {
+  color: var(--ink-700);
+  font-size: var(--text-sm);
+}
+
+.importer__target strong {
+  color: var(--ink-900);
+}
+
 .importer__hint {
   max-width: var(--measure);
   color: var(--ink-400);
@@ -784,6 +893,23 @@
     text-align: left;
   }
 
+  .workspace-bar {
+    padding: 0 var(--space-4);
+  }
+
+  .workspace-bar__main {
+    align-items: stretch;
+  }
+
+  .workspace-bar__field {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .workspace-bar__meta {
+    margin-left: 0;
+  }
+
   .panel {
     padding: var(--space-4);
   }
@@ -794,6 +920,10 @@
 }
 
 @media (max-width: 560px) {
+  .workspace-bar {
+    padding: 0 var(--space-3);
+  }
+
   .app__grid {
     padding: var(--space-3);
   }

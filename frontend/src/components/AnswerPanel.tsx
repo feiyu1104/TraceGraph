@@ -36,6 +36,10 @@ interface AnswerPanelProps {
   hasAsked: boolean
   /** 实际产出本次回答的生成器显示名；后端 metrics.generator 是权威来源。 */
   generatorLabel: string
+  /** 本次回答真正生效的知识库 / 适配器 / 检索链路，全部取自响应 metrics。 */
+  workspaceLabel: string
+  adapterLabel: string
+  retrieverLabel: string
   drawerOpen: boolean
   onToggleDrawer: () => void
   reveal: { evidenceId: string; nonce: number } | null
@@ -49,6 +53,9 @@ export default function AnswerPanel({
   busy,
   hasAsked,
   generatorLabel,
+  workspaceLabel,
+  adapterLabel,
+  retrieverLabel,
   drawerOpen,
   onToggleDrawer,
   reveal,
@@ -153,6 +160,18 @@ export default function AnswerPanel({
       )}
 
       <dl className="metrics">
+        <div>
+          <dt>知识库</dt>
+          <dd>{workspaceLabel}</dd>
+        </div>
+        <div>
+          <dt>适配器</dt>
+          <dd>{adapterLabel}</dd>
+        </div>
+        <div>
+          <dt>检索方式</dt>
+          <dd>{retrieverLabel}</dd>
+        </div>
         <div>
           <dt>跳数</dt>
           <dd>{answer.metrics.max_hops ?? '—'}</dd>

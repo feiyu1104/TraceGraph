@@ -1,4 +1,5 @@
 import type {
+  AdaptersResponse,
   Answer,
   EntityRelations,
   EntitySearchResult,
@@ -6,6 +7,8 @@ import type {
   ModelsResponse,
   RelationEvidence,
   SystemInfo,
+  WorkspaceInfo,
+  WorkspacesResponse,
 } from './types'
 
 export const SUPPORTED_UPLOAD_SUFFIXES = [
@@ -72,8 +75,14 @@ export function fetchHealth(): Promise<{ status: string; version: string }> {
   return request<{ status: string; version: string }>('/healthz')
 }
 
+/**
+ * workspaceId 是必填参数：服务端有默认值，但页面必须每次都把当前选中的
+ * 知识库显式带上，否则「切换到别的知识库后仍查出默认库的内容」这类问题
+ * 只会在运行时才暴露出来。
+ */
 export function askQuestion(
   question: string,
+  workspaceId: string,
   maxHops: number,
   generatorId?: string,
   limit = 8,
@@ -82,6 +91,7 @@ export function askQuestion(
     '/query',
     postJson({
       question,
+      workspace_id: workspaceId,
       max_hops: maxHops,
       limit,
       // 不传就是服务端默认模型；页面永远不参与决定「用哪个网关」。
@@ -92,6 +102,25 @@ export function askQuestion(
 
 export function fetchModels(): Promise<ModelsResponse> {
   return request<ModelsResponse>('/models')
+}
+
+export function fetchWorkspaces(): Promise<WorkspacesResponse> {
+  return request<WorkspacesResponse>('/workspaces')
+}
+
+export function fetchAdapters(): Promise<AdaptersResponse> {
+  return request<AdaptersResponse>('/adapters')
+}
+
+/** 建库只提交名称与内置适配器 ID；适配器清单由服务端决定。 */
+export function createWorkspace(
+  name: string,
+  adapterId: string,
+): Promise<WorkspaceInfo> {
+  return request<WorkspaceInfo>(
+    '/workspaces',
+    postJson({ name, adapter_id: adapterId }),
+  )
 }
 
 function readAsBase64(file: File): Promise<string> {
@@ -112,11 +141,18 @@ function readAsBase64(file: File): Promise<string> {
   })
 }
 
-export async function uploadDocument(file: File): Promise<IngestionResult> {
+export async function uploadDocument(
+  file: File,
+  workspaceId: string,
+): Promise<IngestionResult> {
   const contentBase64 = await readAsBase64(file)
   return request<IngestionResult>(
     '/ingestions/file',
-    postJson({ filename: file.name, content_base64: contentBase64 }),
+    postJson({
+      filename: file.name,
+      content_base64: contentBase64,
+      workspace_id: workspaceId,
+    }),
   )
 }
 

@@ -61,6 +61,12 @@ export interface AnswerMetrics {
   evidence_count?: number
   derived_association_count?: number
   max_hops?: number
+  /** 本次回答所用的知识库；服务端从请求里带过来，不是前端猜的 */
+  workspace_id?: string
+  /** 该知识库记录的领域适配器 ID，由服务端按 Workspace 解析 */
+  adapter_id?: string
+  /** 实际使用的检索链路：hybrid（关键词 + 图）或 keyword */
+  retriever?: string
   /** 本次请求指定的模型 ID；未指定时是服务端默认模型的 ID */
   requested_generator?: string
   /** 实际产出答案的生成器 ID（降级时与 requested_generator 不同） */
@@ -154,6 +160,33 @@ export interface ModelInfo {
 export interface ModelsResponse {
   default: string
   models: ModelInfo[]
+}
+
+/** 一个知识库。adapter_id 只能由服务端在建库时写入，前端没有修改入口。 */
+export interface WorkspaceInfo {
+  id: string
+  name: string
+  adapter_id: string
+  created_at: string
+}
+
+export interface WorkspacesResponse {
+  workspaces: WorkspaceInfo[]
+}
+
+/** 服务端内置的领域适配器。清单里不含提示词、路径或任何密钥。 */
+export interface AdapterInfo {
+  id: string
+  label: string
+  description: string
+  version: string
+  entity_types: string[]
+  relation_types: string[]
+  builtin: boolean
+}
+
+export interface AdaptersResponse {
+  adapters: AdapterInfo[]
 }
 
 export type IngestionStatus = 'pending' | 'succeeded' | 'skipped' | 'failed'
