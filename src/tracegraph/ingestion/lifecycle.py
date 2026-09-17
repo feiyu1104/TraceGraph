@@ -1,4 +1,8 @@
-from tracegraph.core.ports import DocumentRepository, GraphRepository
+from tracegraph.core.ports import (
+    DocumentRepository,
+    GraphRepository,
+    OriginalDocumentStore,
+)
 
 
 class DocumentLifecycleService:
@@ -6,9 +10,11 @@ class DocumentLifecycleService:
         self,
         documents: DocumentRepository,
         graph: GraphRepository | None = None,
+        originals: OriginalDocumentStore | None = None,
     ) -> None:
         self.documents = documents
         self.graph = graph
+        self.originals = originals
 
     def delete(self, document_id: str) -> tuple[str, ...]:
         document = self.documents.get_document(document_id)
@@ -25,4 +31,11 @@ class DocumentLifecycleService:
         deleted_chunk_ids = self.documents.delete_document(document_id)
         if set(deleted_chunk_ids) != set(chunk_ids):
             raise RuntimeError("文档删除结果与预期 Chunk 不一致")
+        if self.originals is not None:
+            # 落点由 Workspace 与 Document ID 现推，既不读数据库里的 stored_path，
+            # 也不接受调用方给的路径，因此递归删除跑不出这个文档自己的目录。
+            self.originals.remove_document(
+                workspace_id=document.workspace_id,
+                document_id=document_id,
+            )
         return deleted_chunk_ids

@@ -153,7 +153,8 @@ class SQLiteDocumentRepository:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT id, document_id, number, content_sha256
+                SELECT id, document_id, number, content_sha256,
+                       original_sha256, original_size, stored_path, original_filename
                 FROM document_versions
                 WHERE document_id = ? AND content_sha256 = ?
                 """,
@@ -165,7 +166,8 @@ class SQLiteDocumentRepository:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT id, document_id, number, content_sha256
+                SELECT id, document_id, number, content_sha256,
+                       original_sha256, original_size, stored_path, original_filename
                 FROM document_versions
                 WHERE document_id = ?
                 ORDER BY number
@@ -178,7 +180,8 @@ class SQLiteDocumentRepository:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT id, document_id, number, content_sha256
+                SELECT id, document_id, number, content_sha256,
+                       original_sha256, original_size, stored_path, original_filename
                 FROM document_versions
                 WHERE id = ?
                 """,
@@ -264,10 +267,21 @@ class SQLiteDocumentRepository:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO document_versions (id, document_id, number, content_sha256)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO document_versions (
+                    id, document_id, number, content_sha256,
+                    original_sha256, original_size, stored_path, original_filename
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (version.id, version.document_id, version.number, version.content_sha256),
+                (
+                    version.id,
+                    version.document_id,
+                    version.number,
+                    version.content_sha256,
+                    version.original_sha256,
+                    version.original_size,
+                    version.stored_path,
+                    version.original_filename,
+                ),
             )
             self._connection.executemany(
                 """
@@ -331,6 +345,11 @@ class SQLiteDocumentRepository:
                     document_id TEXT NOT NULL REFERENCES documents(id),
                     number INTEGER NOT NULL CHECK (number > 0),
                     content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+                    -- 原件信息整体可空：只有留下原件的版本才填，四列同进同退。
+                    original_sha256 TEXT,
+                    original_size INTEGER,
+                    stored_path TEXT,
+                    original_filename TEXT,
                     UNIQUE (document_id, number),
                     UNIQUE (document_id, content_sha256)
                 );
@@ -355,6 +374,7 @@ class SQLiteDocumentRepository:
                 """
             )
             self._adopt_documents_into_workspace()
+            self._adopt_version_original_columns()
         with self._lock:
             # 重建要开关外键，而外键开关在事务内不生效，因此必须在上面的写事务提交之后。
             if not self._documents_schema_is_current():
@@ -392,6 +412,27 @@ class SQLiteDocumentRepository:
             "UPDATE documents SET workspace_id = ? WHERE workspace_id IS NULL",
             (DEFAULT_WORKSPACE_ID,),
         )
+
+    def _adopt_version_original_columns(self) -> None:
+        """给既有库的 document_versions 补上原件四列。
+
+        四列都可空，因此 ADD COLUMN 不重写表，既有版本原样保留，
+        original_* 全为 NULL 就表示这个版本没有留下原件。
+        """
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(document_versions)")
+        }
+        for name, column_type in (
+            ("original_sha256", "TEXT"),
+            ("original_size", "INTEGER"),
+            ("stored_path", "TEXT"),
+            ("original_filename", "TEXT"),
+        ):
+            if name not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE document_versions ADD COLUMN {name} {column_type}"
+                )
 
     def _documents_schema_is_current(self) -> bool:
         """documents 是否已是「workspace_id 非空 + 来源仅在 Workspace 内唯一」。
@@ -501,6 +542,10 @@ def _version_from_row(row: sqlite3.Row) -> DocumentVersion:
         document_id=row["document_id"],
         number=row["number"],
         content_sha256=row["content_sha256"],
+        original_sha256=row["original_sha256"],
+        original_size=row["original_size"],
+        stored_path=row["stored_path"],
+        original_filename=row["original_filename"],
     )
 
 

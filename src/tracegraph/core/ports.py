@@ -80,6 +80,42 @@ class DocumentRepository(Protocol):
     ) -> None: ...
 
 
+class OriginalDocumentStore(Protocol):
+    """上传原件的落盘接口。
+
+    方法只接受服务端生成的 ID，不接受调用方给的路径：落点由存储实现自己
+    拼出来，因此删除时不可能被一个伪造的路径带到目录外面去。
+    """
+
+    def save(
+        self,
+        *,
+        workspace_id: str,
+        document_id: str,
+        version_id: str,
+        suffix: str,
+        raw: bytes,
+    ) -> str:
+        """写入一份原件，返回相对存储根目录的路径。"""
+        ...
+
+    def read(self, stored_path: str) -> bytes | None:
+        """按相对路径读回原件；不存在时返回 None。"""
+        ...
+
+    def exists(self, stored_path: str) -> bool: ...
+
+    def remove_version(
+        self, *, workspace_id: str, document_id: str, version_id: str
+    ) -> None:
+        """删除单个版本的原件目录；目录不存在时什么也不做。"""
+        ...
+
+    def remove_document(self, *, workspace_id: str, document_id: str) -> None:
+        """删除该文档名下的全部原件。"""
+        ...
+
+
 class Retriever(Protocol):
     """将问题转换为统一证据列表的最小检索接口。"""
 

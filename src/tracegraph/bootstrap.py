@@ -18,6 +18,10 @@ from tracegraph.graph_backend import create_graph_repository
 from tracegraph.retrieval.graph import GraphRetriever
 from tracegraph.retrieval.hybrid import HybridRetriever
 from tracegraph.retrieval.keyword import KeywordRetriever
+from tracegraph.storage.originals import (
+    FileSystemOriginalStore,
+    load_original_store_root,
+)
 from tracegraph.storage.sqlite import SQLiteDocumentRepository
 
 
@@ -30,6 +34,7 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
     registry = load_model_registry()
     fallback_name = load_generation_fallback()
     documents = SQLiteDocumentRepository(database_path)
+    originals = FileSystemOriginalStore(load_original_store_root())
     graph, selection = create_graph_repository(database_path)
     if selection.degraded:
         print(
@@ -52,6 +57,7 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
         model_registry=registry,
         graph_status=selection.to_dict(),
         generation_status=registry.system_status(fallback_name),
+        original_store=originals,
     )
 
 

@@ -87,13 +87,38 @@ class DocumentVersion:
     id: str
     document_id: str
     number: int
+    # 解析后正文的哈希；原件哈希见 original_sha256，两者不是一回事。
     content_sha256: str
+    # 原件信息：只有留下原件的版本才有。既有 DUTMed 数据只有解析结果，
+    # 没有原件可追溯，因此这四个字段允许整体缺省，但必须同进同退。
+    original_sha256: str | None = None
+    original_size: int | None = None
+    # 相对存储根目录的路径，不是绝对路径：数据目录搬家后仍然可解析。
+    stored_path: str | None = None
+    original_filename: str | None = None
 
     def __post_init__(self) -> None:
         if self.number < 1:
             raise ValueError("DocumentVersion number must be positive")
         if len(self.content_sha256) != 64:
             raise ValueError("DocumentVersion requires a SHA-256 content hash")
+
+        original = (
+            self.original_sha256,
+            self.original_size,
+            self.stored_path,
+            self.original_filename,
+        )
+        if all(value is None for value in original):
+            return
+        if any(value is None for value in original):
+            raise ValueError("DocumentVersion 的原件信息必须同时提供或同时缺省")
+        if len(self.original_sha256) != 64:
+            raise ValueError("original_sha256 必须是原件字节的 SHA-256")
+        if self.original_size < 0:
+            raise ValueError("original_size 不能为负")
+        if not self.stored_path.strip() or not self.original_filename.strip():
+            raise ValueError("原件的 stored_path 与 original_filename 不能为空")
 
 
 @dataclass(frozen=True, slots=True)

@@ -19,6 +19,7 @@ from tracegraph import __version__
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
     DEFAULT_WORKSPACE_ADAPTER_ID,
+    DEFAULT_WORKSPACE_ID,
     MAX_HOPS,
     Answer,
     AnswerStatus,
@@ -37,6 +38,7 @@ from tracegraph.core.ports import (
     DomainAdapter,
     FeedbackRepository,
     GraphRepository,
+    OriginalDocumentStore,
     Retriever,
 )
 from tracegraph.domains.medical.adapter import MedicalDomainAdapter
@@ -90,11 +92,14 @@ class ApiError(Exception):
 class TextIngestionRequest(BaseModel):
     source_name: str
     content: str
+    # 不传即归入 default Workspace；服务端仍会复检它确实存在。
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
 
 class FileIngestionRequest(BaseModel):
     filename: str
     content_base64: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
 
 class RetrievalRequest(BaseModel):
@@ -141,11 +146,15 @@ def create_app(
     graph_status: Mapping[str, str] | None = None,
     generation_status: Mapping[str, str] | None = None,
     model_registry: ModelRegistry | None = None,
+    original_store: OriginalDocumentStore | None = None,
 ) -> FastAPI:
     document_repository = (
         repository if repository is not None else InMemoryDocumentRepository()
     )
-    ingestion_service = TextIngestionService(document_repository)
+    # 只有显式装配了原件存储，上传的原件才会落盘；测试与内存开发实例默认不留原件。
+    ingestion_service = TextIngestionService(
+        document_repository, original_store=original_store
+    )
     active_retriever = retriever or KeywordRetriever(document_repository)
     active_domain = domain or MedicalDomainAdapter()
     answer_service = AnswerService(
@@ -159,7 +168,9 @@ def create_app(
     max_upload_bytes = load_max_upload_bytes()
     active_feedback_repository = feedback_repository or InMemoryFeedbackRepository()
     feedback_service = FeedbackService(active_feedback_repository)
-    lifecycle_service = DocumentLifecycleService(document_repository, graph_repository)
+    lifecycle_service = DocumentLifecycleService(
+        document_repository, graph_repository, original_store
+    )
     request_metrics = RequestMetrics()
     application = FastAPI(
         title="TraceGraph",
@@ -329,7 +340,9 @@ def create_app(
     def ingest_text(request: TextIngestionRequest) -> dict[str, object]:
         source_name = _source_name(request.source_name, "source_name")
         try:
-            result = ingestion_service.ingest_text(source_name, request.content)
+            result = ingestion_service.ingest_text(
+                source_name, request.content, request.workspace_id
+            )
         except UnsupportedDocumentError as error:
             raise ApiError(400, "unsupported_document", str(error)) from error
         except ValueError as error:
@@ -349,12 +362,37 @@ def create_app(
         if len(raw) > max_upload_bytes:
             raise ApiError(413, "file_too_large", _too_large_detail(len(raw), max_upload_bytes))
         try:
-            result = ingestion_service.ingest_bytes(source_name, raw)
+            result = ingestion_service.ingest_bytes(
+                source_name, raw, request.workspace_id
+            )
         except UnsupportedDocumentError as error:
             raise ApiError(400, "unsupported_document", str(error)) from error
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
         return _ingestion_result_response(result)
+
+    @application.get("/documents/{document_id}/versions/{version_id}/original")
+    def get_document_original(
+        document_id: str, version_id: str
+    ) -> dict[str, object]:
+        """原件元信息。本批只报「保存在哪、多大、什么哈希」，不做浏览器下载。"""
+        version = document_repository.get_version(version_id)
+        if version is None or version.document_id != document_id:
+            raise ApiError(404, "not_found", "文档版本不存在")
+        if version.stored_path is None:
+            raise ApiError(404, "original_not_stored", "该版本没有保存原件")
+        return {
+            "document_id": document_id,
+            "version_id": version_id,
+            "original_filename": version.original_filename,
+            "original_sha256": version.original_sha256,
+            "original_size": version.original_size,
+            # 相对存储根目录的路径；绝对路径不出现在响应里。
+            "stored_path": version.stored_path,
+            "available": (
+                original_store is not None and original_store.exists(version.stored_path)
+            ),
+        }
 
     @application.get("/ingestion-jobs/{job_id}")
     def get_ingestion_job(job_id: str) -> dict[str, object]:
@@ -582,6 +620,11 @@ def _ingestion_result_response(result: IngestionResult) -> dict[str, object]:
             "id": result.version.id,
             "number": result.version.number,
             "content_sha256": result.version.content_sha256,
+            # 没有保存原件的版本（以及既有 DUTMed 数据）这四个字段整体为 null。
+            "original_filename": result.version.original_filename,
+            "original_sha256": result.version.original_sha256,
+            "original_size": result.version.original_size,
+            "stored_path": result.version.stored_path,
         },
         "chunks": [
             {"id": chunk.id, "index": chunk.index, "locator": chunk.locator}
