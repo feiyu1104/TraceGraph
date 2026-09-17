@@ -2,6 +2,7 @@ import hashlib
 
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
     MAX_HOPS,
     Evidence,
     GraphPath,
@@ -49,7 +50,11 @@ class GraphRetriever:
         self.graph = graph_repository
 
     def retrieve(
-        self, query: str, limit: int = 5, max_hops: int = DEFAULT_MAX_HOPS
+        self,
+        query: str,
+        limit: int = 5,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> tuple[Evidence, ...]:
         if not query.strip():
             raise ValueError("query 不能为空")
@@ -94,6 +99,11 @@ class GraphRetriever:
                 document = self.documents.get_document(chunk.document_id)
                 version = self.documents.get_version(chunk.document_version_id)
                 if document is None or version is None:
+                    continue
+                # 图索引本批仍然没有 Workspace 维度（实体与关系不带归属），
+                # 因此按证据所属文档复检一次：别的 Workspace 的文档不会因为
+                # 一条全局关系被带进本次结果。
+                if document.workspace_id != workspace_id:
                     continue
                 bucket.append(
                     Evidence(

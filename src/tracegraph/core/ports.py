@@ -2,6 +2,7 @@ from typing import Protocol
 
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
     AnswerStatus,
     Chunk,
     Document,
@@ -133,12 +134,21 @@ class OriginalDocumentStore(Protocol):
 
 
 class Retriever(Protocol):
-    """将问题转换为统一证据列表的最小检索接口。"""
+    """将问题转换为统一证据列表的最小检索接口。
+
+    `workspace_id` 是「这次检索在哪个 Workspace 里进行」，由调用方按请求
+    传入，不存放在检索器实例上：同一个检索器会被并发请求共用，把它变成
+    实例状态就会出现两个请求互相看到对方 Workspace 的窗口。
+    """
 
     name: str
 
     def retrieve(
-        self, query: str, limit: int = 5, max_hops: int = DEFAULT_MAX_HOPS
+        self,
+        query: str,
+        limit: int = 5,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> tuple[Evidence, ...]: ...
 
 

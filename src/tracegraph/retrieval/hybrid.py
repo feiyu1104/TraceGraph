@@ -1,7 +1,11 @@
 from dataclasses import replace
 import hashlib
 
-from tracegraph.core.contracts import DEFAULT_MAX_HOPS, Evidence
+from tracegraph.core.contracts import (
+    DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
+    Evidence,
+)
 from tracegraph.core.ports import Retriever
 
 
@@ -25,7 +29,11 @@ class HybridRetriever:
         self.rank_constant = rank_constant
 
     def retrieve(
-        self, query: str, limit: int = 5, max_hops: int = DEFAULT_MAX_HOPS
+        self,
+        query: str,
+        limit: int = 5,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> tuple[Evidence, ...]:
         if limit < 1:
             raise ValueError("limit 必须大于 0")
@@ -35,7 +43,7 @@ class HybridRetriever:
             seen_chunks: set[str] = set()
             weight = self.weights.get(retriever.name, 1.0)
             for rank, evidence in enumerate(
-                retriever.retrieve(query, limit, max_hops), start=1
+                retriever.retrieve(query, limit, max_hops, workspace_id), start=1
             ):
                 if evidence.chunk_id in seen_chunks:
                     continue

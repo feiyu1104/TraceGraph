@@ -1,5 +1,6 @@
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
     Answer,
     AnswerStatus,
     Claim,
@@ -44,16 +45,43 @@ class AnswerService:
         graph_repository: GraphRepository | None = None,
         fallback_generator: AnswerGenerator | None = None,
         registry: ModelRegistry | None = None,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> None:
         self.retriever = retriever
         self.domain = domain
         self.graph = graph_repository
         self.fallback_generator = fallback_generator
+        # 本次回答所在的知识库；检索按它限定范围。
+        self.workspace_id = workspace_id
         # 默认生成器就是注册表的默认条目 —— 两者不可能指向不同的东西。
         self.registry = registry or single_generator_registry(
             generator or ExtractiveAnswerGenerator()
         )
         self.generator = self.registry.default_generator
+
+    def for_workspace(
+        self,
+        *,
+        domain: DomainAdapter,
+        retriever: Retriever,
+        graph_repository: GraphRepository | None,
+        workspace_id: str,
+    ) -> "AnswerService":
+        """派生一个只服务本次请求的实例。
+
+        注册表与降级生成器原样带过去，因此「当前用哪个模型」不随 Workspace
+        改变；domain / retriever / graph_repository / workspace_id 则每个请求
+        各持一份，装配时那个实例的 domain 永远不被改写，也不存在两个并发
+        请求互相看到对方适配器的窗口。
+        """
+        return AnswerService(
+            retriever,
+            domain,
+            graph_repository=graph_repository,
+            fallback_generator=self.fallback_generator,
+            registry=self.registry,
+            workspace_id=workspace_id,
+        )
 
     def answer(
         self,
@@ -84,7 +112,9 @@ class AnswerService:
                 text=self.domain.status_message(preflight, normalized),
             )
 
-        retrieved = self.retriever.retrieve(normalized, limit, max_hops)
+        retrieved = self.retriever.retrieve(
+            normalized, limit, max_hops, self.workspace_id
+        )
         # 原文事实（1 跳或无图路径）与推导关联（多跳）在此彻底分流：
         # 生成器只拿到 facts，因此 Claim 在数据流上不可能来自多跳推测。
         facts, derived = _split_by_hops(retrieved)

@@ -2,6 +2,7 @@ import pytest
 
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
     AnswerStatus,
     Claim,
     Entity,
@@ -127,7 +128,11 @@ class _FixedRetriever:
         self.evidences = evidences
 
     def retrieve(
-        self, query: str, limit: int = 5, max_hops: int = DEFAULT_MAX_HOPS
+        self,
+        query: str,
+        limit: int = 5,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> tuple[Evidence, ...]:
         return self.evidences
 
@@ -456,7 +461,7 @@ def test_unknown_generator_id_fails_before_any_retrieval() -> None:
     class _RecordingRetriever:
         name = "recording"
 
-        def retrieve(self, query, limit=5, max_hops=DEFAULT_MAX_HOPS):
+        def retrieve(self, query, limit=5, max_hops=DEFAULT_MAX_HOPS, workspace_id=None):
             seen.append(query)
             return ()
 
@@ -475,7 +480,7 @@ def test_max_hops_is_forwarded_to_the_retriever() -> None:
     class _RecordingRetriever:
         name = "recording"
 
-        def retrieve(self, query, limit=5, max_hops=DEFAULT_MAX_HOPS):
+        def retrieve(self, query, limit=5, max_hops=DEFAULT_MAX_HOPS, workspace_id=None):
             seen.append(max_hops)
             return ()
 

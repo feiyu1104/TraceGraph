@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from tracegraph import __version__
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ADAPTER_ID,
     DEFAULT_WORKSPACE_ID,
     MAX_HOPS,
     Answer,
@@ -115,6 +116,8 @@ class RetrievalRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=50)
     # 刻意不加 ge/le：越界的 max_hops 要返回 400 而不是 pydantic 的 422。
     max_hops: int = DEFAULT_MAX_HOPS
+    # 不传即查默认 Workspace，既有前端因此不用改。
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
 
 class QueryRequest(BaseModel):
@@ -123,6 +126,8 @@ class QueryRequest(BaseModel):
     max_hops: int = DEFAULT_MAX_HOPS
     # 不传表示用服务端默认模型；离线摘录固定为 "extractive"。
     generator_id: str | None = None
+    # 适配器由服务端按这个 Workspace 的记录解析，请求里不接受 adapter_id。
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -328,8 +333,8 @@ def create_app(
         if not adapter_id:
             raise ApiError(400, "invalid_adapter", "adapter_id 不能为空。")
         try:
-            # 只做校验，不消费适配器：本批 Workspace 只记录 adapter_id，
-            # 查询链路仍固定使用装配时传入的领域适配器。
+            # 建库时就解析一次：注册表里没有的 ID 不允许被写进 Workspace，
+            # 否则查询时会卡在一个永远解析不出来的归属上。
             known_adapters.resolve(adapter_id)
         except UnknownAdapterError as error:
             raise ApiError(400, "invalid_adapter", str(error)) from error
@@ -445,14 +450,22 @@ def create_app(
     @application.post("/retrieval/search")
     def retrieve(request: RetrievalRequest) -> dict[str, object]:
         _require_valid_max_hops(request.max_hops)
+        workspace = _require_workspace(document_repository, request.workspace_id)
+        adapter = _require_adapter(known_adapters, workspace)
+        retriever, _ = _retrieval_route(
+            workspace, active_retriever, document_repository, graph_repository
+        )
         try:
-            evidences = active_retriever.retrieve(
-                request.query, request.limit, request.max_hops
+            evidences = retriever.retrieve(
+                request.query, request.limit, request.max_hops, workspace.id
             )
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
         return {
             "query": request.query,
+            "workspace_id": workspace.id,
+            "adapter_id": adapter.name,
+            "retriever": retriever.name,
             "max_hops": request.max_hops,
             "evidences": [_evidence_response(evidence) for evidence in evidences],
         }
@@ -520,8 +533,21 @@ def create_app(
     @application.post("/query")
     def query(request: QueryRequest) -> dict[str, object]:
         _require_valid_max_hops(request.max_hops)
+        workspace = _require_workspace(document_repository, request.workspace_id)
+        adapter = _require_adapter(known_adapters, workspace)
+        retriever, request_graph = _retrieval_route(
+            workspace, active_retriever, document_repository, graph_repository
+        )
+        # 装配时那个 AnswerService 从头到尾不改：本次请求的适配器与检索器装在
+        # 一个只活在这次调用里的实例上，并发请求之间没有可互相覆盖的状态。
+        service = answer_service.for_workspace(
+            domain=adapter,
+            retriever=retriever,
+            graph_repository=request_graph,
+            workspace_id=workspace.id,
+        )
         try:
-            answer = answer_service.answer(
+            answer = service.answer(
                 request.question,
                 request.limit,
                 request.max_hops,
@@ -534,7 +560,12 @@ def create_app(
             raise ApiError(503, "generator_unavailable", str(error)) from error
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
-        return _answer_response(answer)
+        return _answer_response(
+            answer,
+            workspace_id=workspace.id,
+            adapter_id=adapter.name,
+            retriever=retriever.name,
+        )
 
     @application.post("/feedback")
     def submit_feedback(request: FeedbackRequest) -> dict[str, object]:
@@ -591,6 +622,48 @@ def load_max_upload_bytes(environ: Mapping[str, str] | None = None) -> int:
     if megabytes <= 0:
         raise ValueError(f"{MAX_UPLOAD_ENV} 必须大于 0。")
     return int(megabytes * 1024 * 1024)
+
+
+def _require_workspace(
+    repository: DocumentRepository, workspace_id: str
+) -> Workspace:
+    workspace = repository.get_workspace(workspace_id)
+    if workspace is None:
+        raise ApiError(404, "workspace_not_found", f"未找到 Workspace：{workspace_id}")
+    return workspace
+
+
+def _require_adapter(registry: AdapterRegistry, workspace: Workspace) -> DomainAdapter:
+    """按 Workspace 记录解析适配器。
+
+    客户端不能直接指定适配器：它只能选 Workspace，用哪个领域适配器是那份
+    记录自己说了算。注册表里已经没有这个 ID 时明确报错，不悄悄退回医疗。
+    """
+    try:
+        return registry.resolve(workspace.adapter_id)
+    except UnknownAdapterError as error:
+        raise ApiError(409, "workspace_adapter_unavailable", str(error)) from error
+
+
+def _retrieval_route(
+    workspace: Workspace,
+    retriever: Retriever,
+    repository: DocumentRepository,
+    graph: GraphRepository | None,
+) -> tuple[Retriever, GraphRepository | None]:
+    """本次请求走哪条检索链路。
+
+    图索引本批仍没有 Workspace 维度，因此只有 ws-default 的医疗 Workspace
+    继续用装配时那条混合检索；其他 Workspace 一律只走本 Workspace 的关键词
+    检索 —— 既不调用图仓储，也不可能带出医疗图谱里的证据。图仓储一并置空，
+    非医疗 Workspace 的冲突判定也就不会去问那张全局医疗图。
+    """
+    if (
+        workspace.id == DEFAULT_WORKSPACE_ID
+        and workspace.adapter_id == DEFAULT_WORKSPACE_ADAPTER_ID
+    ):
+        return retriever, graph
+    return KeywordRetriever(repository), None
 
 
 def _source_name(filename: str, field: str) -> str:
@@ -792,7 +865,9 @@ def _relation_response(
     }
 
 
-def _answer_response(answer: Answer) -> dict[str, object]:
+def _answer_response(
+    answer: Answer, *, workspace_id: str, adapter_id: str, retriever: str
+) -> dict[str, object]:
     return {
         "status": answer.status.value,
         "text": answer.text,
@@ -807,7 +882,14 @@ def _answer_response(answer: Answer) -> dict[str, object]:
         ],
         "evidences": [_evidence_response(evidence) for evidence in answer.evidences],
         "warnings": list(answer.warnings),
-        "metrics": dict(answer.metrics),
+        # 本次回答用了哪个知识库、哪个领域适配器、哪条检索链路。这三种状态
+        # （答出、证据不足、证据冲突）都带上，前端不必按 status 分支。
+        "metrics": {
+            **answer.metrics,
+            "workspace_id": workspace_id,
+            "adapter_id": adapter_id,
+            "retriever": retriever,
+        },
     }
 
 

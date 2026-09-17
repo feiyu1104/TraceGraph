@@ -3,6 +3,7 @@ import re
 
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
+    DEFAULT_WORKSPACE_ID,
     Chunk,
     Document,
     DocumentVersion,
@@ -24,7 +25,11 @@ class KeywordRetriever:
         self.repository = repository
 
     def retrieve(
-        self, query: str, limit: int = 5, max_hops: int = DEFAULT_MAX_HOPS
+        self,
+        query: str,
+        limit: int = 5,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> tuple[Evidence, ...]:
         # 关键词检索没有图结构，接受 max_hops 仅为满足 Retriever 端口。
         del max_hops
@@ -36,7 +41,10 @@ class KeywordRetriever:
 
         query_terms = _terms(normalized_query)
         matches: list[tuple[float, Document, DocumentVersion, Chunk]] = []
-        for document in self.repository.list_documents():
+        # 扫描范围在文档这一层就限定死了：别的 Workspace 的文档根本不进候选，
+        # 因此不存在「先全量召回、再在结果末尾按 Workspace 过滤」那种既泄漏
+        # 排序位次又白跑一遍的实现。
+        for document in self.repository.list_documents(workspace_id):
             versions = self.repository.list_versions(document.id)
             if not versions:
                 continue
