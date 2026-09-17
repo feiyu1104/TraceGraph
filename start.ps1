@@ -50,7 +50,7 @@ foreach ($name in @(
     }
 }
 
-# -Mode 优先于 .env；两者都没有时用 SQLite —— 它不需要任何外部依赖。
+# -Mode overrides .env. SQLite is the dependency-free default.
 if (-not $Mode) { $Mode = $env:TRACEGRAPH_GRAPH_BACKEND }
 if (-not $Mode) { $Mode = "sqlite" }
 $Mode = $Mode.ToLower()
@@ -96,9 +96,9 @@ if ($Mode -eq "neo4j") {
 
     if ($blocked) {
         if ($fallback -eq "sqlite") {
-            Write-Host "TRACEGRAPH_GRAPH_FALLBACK=sqlite：本次将以 SQLite 图后端启动，/system 会标明降级。" -ForegroundColor Yellow
+            Write-Host "TRACEGRAPH_GRAPH_FALLBACK=sqlite: starting with the SQLite graph backend. /system will report the fallback." -ForegroundColor Yellow
         } else {
-            Write-Host "Neo4j 不可用。改用 SQLite 请运行：.\start.ps1 -Mode sqlite" -ForegroundColor Yellow
+            Write-Host "Neo4j is unavailable. To use SQLite, run: .\start.ps1 -Mode sqlite" -ForegroundColor Yellow
             exit 1
         }
     }
@@ -115,12 +115,12 @@ if (Test-LocalPort 8000) {
 if ($Mode -eq "neo4j" -and -not $blocked) {
     Write-Host "Graph backend: Neo4j (http://localhost:7474)"
 } elseif ($Mode -eq "neo4j") {
-    Write-Host "Graph backend: SQLite (Neo4j 请求已降级，见 /system)"
+    Write-Host "Graph backend: SQLite (Neo4j request fell back; see /system)"
 } else {
     Write-Host "Graph backend: SQLite ($projectRoot\data\local\tracegraph.db)"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "frontend\dist\index.html"))) {
-    Write-Host "前端尚未构建，/app 会返回 503。构建一次即可：npm --prefix frontend install; npm --prefix frontend run build" -ForegroundColor Yellow
+    Write-Host "Frontend is not built; /app will return 503. Run: npm --prefix frontend install; npm --prefix frontend run build" -ForegroundColor Yellow
 }
 Write-Host "TraceGraph:     http://127.0.0.1:8000/app"
 Write-Host "Press Ctrl+C to stop this run. If Neo4j remains active, use .\stop-neo4j.ps1."
