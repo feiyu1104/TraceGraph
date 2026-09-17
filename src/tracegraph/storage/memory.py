@@ -209,3 +209,9 @@ class InMemoryDocumentRepository:
             self._version_ids_by_document[version.document_id].append(version.id)
             self._chunks_by_version[version.id] = chunks
             self._jobs[job.id] = job
+            # 与 SQLite 一致：新版本就是文档最近一次写入。
+            if version.created_at:
+                document = self._documents[version.document_id]
+                self._documents[document.id] = replace(
+                    document, updated_at=version.created_at
+                )

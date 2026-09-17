@@ -4,6 +4,7 @@
 未经审核的候选不允许进入正式图谱，因此这里连「可能写图」的入口都不存在。
 """
 
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 from threading import RLock
@@ -14,9 +15,21 @@ from tracegraph.core.contracts import (
     CandidateKind,
     CandidateRelation,
     CandidateStatus,
+    CandidateTally,
     ExtractionRun,
     ExtractionStatus,
 )
+
+
+# 判断「该文档名下有没有已发布的候选」：实体与关系各查一次，任何一个命中
+# 就算命中。参数顺序是 (workspace_id, document_id) 重复两遍。
+_PUBLISHED_QUERY = """
+    SELECT 1 FROM candidate_entities
+    WHERE workspace_id = ? AND document_id = ? AND published_at IS NOT NULL
+    UNION ALL
+    SELECT 1 FROM candidate_relations
+    WHERE workspace_id = ? AND document_id = ? AND published_at IS NOT NULL
+"""
 
 
 def _validate_batch(
@@ -196,6 +209,161 @@ class InMemoryCandidateRepository:
                     ),
                     key=lambda relation: (relation.extraction_run_id, relation.type, relation.id),
                 )
+            )
+
+    def get_entity(self, candidate_id: str) -> CandidateEntity | None:
+        with self._lock:
+            return self._entities.get(candidate_id)
+
+    def get_relation(self, candidate_id: str) -> CandidateRelation | None:
+        with self._lock:
+            return self._relations.get(candidate_id)
+
+    def save_entity(self, entity: CandidateEntity) -> None:
+        # 只替换可变字段：归属、文档与证据由抽取产生，服务层即使传进来一个
+        # 改过 document_id 的对象，落库的仍是原来那一份。
+        with self._lock:
+            stored = self._entities.get(entity.id)
+            if stored is None or stored.workspace_id != entity.workspace_id:
+                raise KeyError(entity.id)
+            self._entities[entity.id] = replace(
+                stored,
+                name=entity.name,
+                normalized_name=entity.normalized_name,
+                type=entity.type,
+                status=entity.status,
+                updated_at=entity.updated_at,
+                published_at=entity.published_at,
+                graph_id=entity.graph_id,
+            )
+
+    def save_relation(self, relation: CandidateRelation) -> None:
+        with self._lock:
+            stored = self._relations.get(relation.id)
+            if stored is None or stored.workspace_id != relation.workspace_id:
+                raise KeyError(relation.id)
+            self._relations[relation.id] = replace(
+                stored,
+                source_entity_id=relation.source_entity_id,
+                target_entity_id=relation.target_entity_id,
+                type=relation.type,
+                status=relation.status,
+                updated_at=relation.updated_at,
+                published_at=relation.published_at,
+                graph_id=relation.graph_id,
+            )
+
+    def apply_review(
+        self,
+        workspace_id: str,
+        *,
+        entity_ids: tuple[str, ...],
+        relation_ids: tuple[str, ...],
+        status: CandidateStatus,
+        updated_at: str,
+    ) -> None:
+        # 先整体检查、再整体写入：任何一个不在这个 Workspace 里，整批一个字
+        # 都不改，与 SQLite 侧「一个事务」的语义一致。
+        with self._lock:
+            unowned = self._unowned(workspace_id, entity_ids, relation_ids)
+            if unowned is not None:
+                raise KeyError(unowned)
+            for candidate_id in entity_ids:
+                self._entities[candidate_id] = replace(
+                    self._entities[candidate_id], status=status, updated_at=updated_at
+                )
+            for candidate_id in relation_ids:
+                self._relations[candidate_id] = replace(
+                    self._relations[candidate_id], status=status, updated_at=updated_at
+                )
+
+    def _unowned(
+        self,
+        workspace_id: str,
+        entity_ids: tuple[str, ...],
+        relation_ids: tuple[str, ...],
+    ) -> str | None:
+        """返回第一个不存在或不属于该 Workspace 的候选 ID。"""
+        for candidate_id in entity_ids:
+            entity = self._entities.get(candidate_id)
+            if entity is None or entity.workspace_id != workspace_id:
+                return candidate_id
+        for candidate_id in relation_ids:
+            relation = self._relations.get(candidate_id)
+            if relation is None or relation.workspace_id != workspace_id:
+                return candidate_id
+        return None
+
+    def mark_published(
+        self,
+        workspace_id: str,
+        *,
+        entities: tuple[tuple[str, str], ...],
+        relations: tuple[tuple[str, str], ...],
+        published_at: str,
+    ) -> None:
+        with self._lock:
+            unowned = self._unowned(
+                workspace_id,
+                tuple(candidate_id for candidate_id, _ in entities),
+                tuple(candidate_id for candidate_id, _ in relations),
+            )
+            if unowned is not None:
+                raise KeyError(unowned)
+            for candidate_id, graph_id in entities:
+                self._entities[candidate_id] = replace(
+                    self._entities[candidate_id],
+                    published_at=published_at,
+                    graph_id=graph_id,
+                )
+            for candidate_id, graph_id in relations:
+                self._relations[candidate_id] = replace(
+                    self._relations[candidate_id],
+                    published_at=published_at,
+                    graph_id=graph_id,
+                )
+
+    def has_published_candidates(self, workspace_id: str, document_id: str) -> bool:
+        with self._lock:
+            return any(
+                candidate.workspace_id == workspace_id
+                and candidate.document_id == document_id
+                and candidate.is_published
+                for candidate in (*self._entities.values(), *self._relations.values())
+            )
+
+    def tally_documents(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> dict[str, CandidateTally]:
+        with self._lock:
+            # 请求里的每个文档都要有一份计数：没有候选的文档计为零，而不是
+            # 缺席，调用方不必为「查不到」单独分支。
+            totals = {
+                document_id: {"pending": 0, "approved": 0, "rejected": 0, "published": 0}
+                for document_id in document_ids
+            }
+            for candidate in (*self._entities.values(), *self._relations.values()):
+                if candidate.workspace_id != workspace_id:
+                    continue
+                counts = totals.get(candidate.document_id)
+                if counts is None:
+                    continue
+                counts[candidate.status.value] += 1
+                if candidate.is_published:
+                    counts["published"] += 1
+        return {
+            document_id: CandidateTally(**counts) for document_id, counts in totals.items()
+        }
+
+    def documents_with_runs(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        wanted = set(document_ids)
+        with self._lock:
+            return frozenset(
+                run.document_id
+                for run in self._runs.values()
+                if run.workspace_id == workspace_id and run.document_id in wanted
             )
 
     def delete_document(self, document_id: str) -> None:
@@ -467,6 +635,189 @@ class SQLiteCandidateRepository:
             _relation_from_row(row, evidence.get(row["id"], ())) for row in rows
         )
 
+    def get_entity(self, candidate_id: str) -> CandidateEntity | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM candidate_entities WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            evidence = self._entity_evidence((candidate_id,))
+        return _entity_from_row(row, evidence.get(candidate_id, ()))
+
+    def get_relation(self, candidate_id: str) -> CandidateRelation | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM candidate_relations WHERE id = ?", (candidate_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            evidence = self._relation_evidence((candidate_id,))
+        return _relation_from_row(row, evidence.get(candidate_id, ()))
+
+    def save_entity(self, entity: CandidateEntity) -> None:
+        # 可写列就是这几列：workspace_id 与 document_id 等既不在 SET 里，也在
+        # WHERE 里参与匹配，因此「把候选改到别的 Workspace / 别的文档去」在
+        # SQL 层面写不出来，不需要再靠调用方自觉。
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE candidate_entities
+                SET name = ?, normalized_name = ?, type = ?, status = ?,
+                    updated_at = ?, published_at = ?, graph_id = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    entity.name,
+                    entity.normalized_name,
+                    entity.type,
+                    entity.status.value,
+                    entity.updated_at,
+                    entity.published_at,
+                    entity.graph_id,
+                    entity.id,
+                    entity.workspace_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(entity.id)
+
+    def save_relation(self, relation: CandidateRelation) -> None:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE candidate_relations
+                SET source_entity_id = ?, target_entity_id = ?, type = ?, status = ?,
+                    updated_at = ?, published_at = ?, graph_id = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    relation.source_entity_id,
+                    relation.target_entity_id,
+                    relation.type,
+                    relation.status.value,
+                    relation.updated_at,
+                    relation.published_at,
+                    relation.graph_id,
+                    relation.id,
+                    relation.workspace_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(relation.id)
+
+    def apply_review(
+        self,
+        workspace_id: str,
+        *,
+        entity_ids: tuple[str, ...],
+        relation_ids: tuple[str, ...],
+        status: CandidateStatus,
+        updated_at: str,
+    ) -> None:
+        # 一个事务：批量审核里只要有一条对不上 Workspace，抛出的 KeyError 会
+        # 让整个 with 块回滚，不存在「改了一半」的中间状态。
+        with self._lock, self._connection:
+            for table, candidate_ids in (
+                ("candidate_entities", entity_ids),
+                ("candidate_relations", relation_ids),
+            ):
+                for candidate_id in candidate_ids:
+                    cursor = self._connection.execute(
+                        f"""
+                        UPDATE {table} SET status = ?, updated_at = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (status.value, updated_at, candidate_id, workspace_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise KeyError(candidate_id)
+
+    def mark_published(
+        self,
+        workspace_id: str,
+        *,
+        entities: tuple[tuple[str, str], ...],
+        relations: tuple[tuple[str, str], ...],
+        published_at: str,
+    ) -> None:
+        with self._lock, self._connection:
+            for table, pairs in (
+                ("candidate_entities", entities),
+                ("candidate_relations", relations),
+            ):
+                for candidate_id, graph_id in pairs:
+                    cursor = self._connection.execute(
+                        f"""
+                        UPDATE {table} SET published_at = ?, graph_id = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (published_at, graph_id, candidate_id, workspace_id),
+                    )
+                    if cursor.rowcount != 1:
+                        raise KeyError(candidate_id)
+
+    def has_published_candidates(self, workspace_id: str, document_id: str) -> bool:
+        with self._lock:
+            row = self._connection.execute(
+                f"""
+                SELECT EXISTS({_PUBLISHED_QUERY}) AS found
+                """,
+                (workspace_id, document_id, workspace_id, document_id),
+            ).fetchone()
+        return bool(row["found"])
+
+    def tally_documents(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> dict[str, CandidateTally]:
+        if not document_ids:
+            return {}
+        placeholders = ",".join("?" for _ in document_ids)
+        counts: dict[str, dict[str, int]] = {
+            document_id: {"pending": 0, "approved": 0, "rejected": 0, "published": 0}
+            for document_id in document_ids
+        }
+        with self._lock:
+            for table in ("candidate_entities", "candidate_relations"):
+                # published 与审核状态正交：一条已批准的候选发布后仍然计在
+                # approved 里，因此两个计数分开累加，而不是互相排斥。
+                rows = self._connection.execute(
+                    f"""
+                    SELECT document_id, status,
+                           COUNT(*) AS total,
+                           SUM(CASE WHEN published_at IS NULL THEN 0 ELSE 1 END)
+                               AS published
+                    FROM {table}
+                    WHERE workspace_id = ? AND document_id IN ({placeholders})
+                    GROUP BY document_id, status
+                    """,
+                    (workspace_id, *document_ids),
+                ).fetchall()
+                for row in rows:
+                    bucket = counts[row["document_id"]]
+                    bucket[row["status"]] += row["total"]
+                    bucket["published"] += row["published"]
+        return {
+            document_id: CandidateTally(**bucket)
+            for document_id, bucket in counts.items()
+        }
+
+    def documents_with_runs(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        if not document_ids:
+            return frozenset()
+        placeholders = ",".join("?" for _ in document_ids)
+        with self._lock:
+            rows = self._connection.execute(
+                f"""
+                SELECT DISTINCT document_id FROM extraction_runs
+                WHERE workspace_id = ? AND document_id IN ({placeholders})
+                """,
+                (workspace_id, *document_ids),
+            ).fetchall()
+        return frozenset(row["document_id"] for row in rows)
+
     def delete_document(self, document_id: str) -> None:
         with self._lock, self._connection:
             # 顺序由外键决定：证据关联引用候选，候选引用抽取任务，因此从小到大删。
@@ -598,6 +949,10 @@ class SQLiteCandidateRepository:
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    -- 发布结果与审核状态分开存：published_at 非空即已发布，
+                    -- graph_id 是它在图后端的落点。两者同时为空表示还没发布。
+                    published_at TEXT,
+                    graph_id TEXT,
                     -- 同一抽取任务内，同名同类型的实体只有一条。
                     UNIQUE (extraction_run_id, normalized_name, type)
                 );
@@ -618,6 +973,8 @@ class SQLiteCandidateRepository:
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    published_at TEXT,
+                    graph_id TEXT,
                     CHECK (source_entity_id <> target_entity_id),
                     UNIQUE (extraction_run_id, source_entity_id, target_entity_id, type)
                 );
@@ -640,6 +997,25 @@ class SQLiteCandidateRepository:
                 );
                 """
             )
+            self._migrate_publication_columns()
+
+    def _migrate_publication_columns(self) -> None:
+        """给发布功能出现之前的候选表补上发布结果两列。
+
+        只做加法：既有行的 published_at 与 graph_id 为空，读出来就是「还没
+        发布」，与它们实际的处境一致。逐列判断，因此重复打开同一个文件不会
+        重复添加，也不会改动任何已有的候选、证据或审核状态。
+        """
+        for table in ("candidate_entities", "candidate_relations"):
+            columns = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            for column in ("published_at", "graph_id"):
+                if column not in columns:
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {column} TEXT"
+                    )
 
 
 def _workspace_query(
@@ -705,6 +1081,8 @@ def _entity_from_row(
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         status=CandidateStatus(row["status"]),
+        published_at=row["published_at"],
+        graph_id=row["graph_id"],
     )
 
 
@@ -725,4 +1103,6 @@ def _relation_from_row(
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         status=CandidateStatus(row["status"]),
+        published_at=row["published_at"],
+        graph_id=row["graph_id"],
     )

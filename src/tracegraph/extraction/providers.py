@@ -10,6 +10,7 @@ import json
 from typing import Protocol
 
 from tracegraph.core.contracts import Chunk, ExtractionVocabulary
+from tracegraph.core.identity import normalize_name
 from tracegraph.core.ports import DomainAdapter
 from tracegraph.generation.providers import (
     ChatCompleter,
@@ -24,8 +25,9 @@ from tracegraph.generation.providers import (
 # 约定把「主体 > 章节」拆回来。
 _LOCATOR_SEPARATOR = " > "
 
-# 名称首尾这些字符不参与身份判断："(咳嗽)" 与 "咳嗽" 是同一条候选。
-_EDGE_PUNCTUATION = " \t\r\n　.。,，;；:：、!！?？\"'“”‘’()（）[]【】{}<>《》"
+# 抽取器与发布服务必须按同一个规范化名称合并实体，因此规则只有一份，
+# 住在 core/identity.py；这里保留同名导入，本模块的调用方不受影响。
+__all__ = ["normalize_name"]
 
 
 class ExtractionError(GenerationError):
@@ -84,17 +86,6 @@ class CandidateExtractor(Protocol):
     def extract(
         self, chunks: tuple[Chunk, ...], adapter: DomainAdapter
     ) -> ExtractionDraft: ...
-
-
-def normalize_name(name: str) -> str:
-    """名称的基础规范化：折叠空白、剥掉首尾标点、统一大小写。
-
-    只做这些。同义词归并需要领域知识，不属于这里 —— 猜错的归并会把两条
-    不同的知识合并成一条，比留着两条重复更难发现。
-    """
-    collapsed = " ".join(name.split())
-    stripped = collapsed.strip(_EDGE_PUNCTUATION)
-    return (stripped or collapsed).casefold()
 
 
 class ExtractiveCandidateExtractor:

@@ -1,9 +1,11 @@
 from collections.abc import Iterable
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 from threading import RLock
 
 from tracegraph.core.contracts import (
+    DEFAULT_WORKSPACE_ID,
     Entity,
     FrontierExpansion,
     GraphStatistics,
@@ -11,6 +13,7 @@ from tracegraph.core.contracts import (
     Relation,
     TraversalDirection,
 )
+from tracegraph.core.identity import normalize_name
 
 
 _OUTGOING_BRANCH = """
@@ -24,6 +27,7 @@ _OUTGOING_BRANCH = """
     FROM frontier
     JOIN relations ON relations.source_entity_id = frontier.node_id
     WHERE relations.source_entity_id <> relations.target_entity_id
+      AND relations.workspace_id = ?
 """
 
 _INCOMING_BRANCH = """
@@ -37,6 +41,7 @@ _INCOMING_BRANCH = """
     FROM frontier
     JOIN relations ON relations.target_entity_id = frontier.node_id
     WHERE relations.source_entity_id <> relations.target_entity_id
+      AND relations.workspace_id = ?
 """
 
 
@@ -89,10 +94,12 @@ class InMemoryGraphRepository:
 
     def upsert_relation(self, relation: Relation) -> None:
         with self._lock:
-            if relation.source_entity_id not in self._entities:
-                raise ValueError("关系的源实体不存在")
-            if relation.target_entity_id not in self._entities:
-                raise ValueError("关系的目标实体不存在")
+            source = self._entities.get(relation.source_entity_id)
+            target = self._entities.get(relation.target_entity_id)
+            if source is None or source.workspace_id != relation.workspace_id:
+                raise ValueError("关系的源实体不存在或不属于同一个 Workspace")
+            if target is None or target.workspace_id != relation.workspace_id:
+                raise ValueError("关系的目标实体不存在或不属于同一个 Workspace")
             self._relations[relation.id] = relation
 
     def replace_outgoing_graph(
@@ -104,42 +111,108 @@ class InMemoryGraphRepository:
         with self._lock:
             self._entities[source.id] = source
             self._entities.update({entity.id: entity for entity in targets})
+            # 只清掉这个 Workspace 里从 source 出发的边：同名实体在别的
+            # Workspace 里的出边与本次导入无关。
             self._relations = {
                 relation_id: relation
                 for relation_id, relation in self._relations.items()
-                if relation.source_entity_id != source.id
+                if not (
+                    relation.source_entity_id == source.id
+                    and relation.workspace_id == source.workspace_id
+                )
             }
             self._relations.update({relation.id: relation for relation in relations})
 
-    def get_entity(self, entity_id: str) -> Entity | None:
+    def get_entity(self, entity_id: str, workspace_id: str) -> Entity | None:
         with self._lock:
-            return self._entities.get(entity_id)
+            entity = self._entities.get(entity_id)
+        return entity if entity is not None and entity.workspace_id == workspace_id else None
 
-    def search_entities(self, query: str, limit: int = 5) -> tuple[Entity, ...]:
+    def find_entity_by_key(
+        self, workspace_id: str, entity_type: str, normalized_name: str
+    ) -> Entity | None:
         with self._lock:
-            return rank_entities(tuple(self._entities.values()), query, limit)
+            matches = sorted(
+                (
+                    entity
+                    for entity in self._entities.values()
+                    if entity.workspace_id == workspace_id
+                    and entity.type.casefold() == entity_type.casefold()
+                    and normalize_name(entity.name) == normalized_name
+                ),
+                key=lambda entity: entity.id,
+            )
+        return matches[0] if matches else None
+
+    def search_entities(
+        self, query: str, workspace_id: str, limit: int = 5
+    ) -> tuple[Entity, ...]:
+        with self._lock:
+            entities = tuple(
+                entity
+                for entity in self._entities.values()
+                if entity.workspace_id == workspace_id
+            )
+        return rank_entities(entities, query, limit)
 
     def list_relations(
-        self, entity_ids: tuple[str, ...], limit: int = 20
+        self, entity_ids: tuple[str, ...], workspace_id: str, limit: int = 20
     ) -> tuple[Relation, ...]:
         known = set(entity_ids)
         with self._lock:
             relations = (
                 relation
                 for relation in self._relations.values()
-                if relation.source_entity_id in known
-                or relation.target_entity_id in known
+                if relation.workspace_id == workspace_id
+                and (
+                    relation.source_entity_id in known
+                    or relation.target_entity_id in known
+                )
             )
             return tuple(sorted(relations, key=lambda item: item.id)[:limit])
 
-    def get_relation(self, relation_id: str) -> Relation | None:
+    def get_relation(self, relation_id: str, workspace_id: str) -> Relation | None:
         with self._lock:
-            return self._relations.get(relation_id)
+            relation = self._relations.get(relation_id)
+        return (
+            relation
+            if relation is not None and relation.workspace_id == workspace_id
+            else None
+        )
 
-    def statistics(self) -> GraphStatistics:
+    def find_relation_by_key(
+        self,
+        workspace_id: str,
+        source_entity_id: str,
+        relation_type: str,
+        target_entity_id: str,
+    ) -> Relation | None:
         with self._lock:
-            entities = tuple(self._entities.values())
-            relations = tuple(self._relations.values())
+            matches = sorted(
+                (
+                    relation
+                    for relation in self._relations.values()
+                    if relation.workspace_id == workspace_id
+                    and relation.source_entity_id == source_entity_id
+                    and relation.target_entity_id == target_entity_id
+                    and relation.type.casefold() == relation_type.casefold()
+                ),
+                key=lambda relation: relation.id,
+            )
+        return matches[0] if matches else None
+
+    def statistics(self, workspace_id: str) -> GraphStatistics:
+        with self._lock:
+            entities = tuple(
+                entity
+                for entity in self._entities.values()
+                if entity.workspace_id == workspace_id
+            )
+            relations = tuple(
+                relation
+                for relation in self._relations.values()
+                if relation.workspace_id == workspace_id
+            )
         connected = {
             entity_id
             for relation in relations
@@ -148,11 +221,15 @@ class InMemoryGraphRepository:
         return _statistics(entities, relations, connected)
 
     def find_opposing_relations(
-        self, entity_id: str, relation_types: tuple[str, str]
+        self, entity_id: str, relation_types: tuple[str, str], workspace_id: str
     ) -> tuple[Relation, ...]:
         first, second = relation_types
         with self._lock:
-            relations = tuple(self._relations.values())
+            relations = tuple(
+                relation
+                for relation in self._relations.values()
+                if relation.workspace_id == workspace_id
+            )
         first_targets = set()
         second_targets = set()
         for relation in relations:
@@ -182,6 +259,7 @@ class InMemoryGraphRepository:
         self,
         node_ids: tuple[str, ...],
         *,
+        workspace_id: str,
         fanout: int,
         relation_types: tuple[str, ...] | None = None,
         direction: TraversalDirection | None = None,
@@ -194,7 +272,11 @@ class InMemoryGraphRepository:
         wanted = set(relation_types) if relation_types is not None else None
         with self._lock:
             entities = dict(self._entities)
-            relations = tuple(self._relations.values())
+            relations = tuple(
+                relation
+                for relation in self._relations.values()
+                if relation.workspace_id == workspace_id
+            )
         incident: dict[str, list[Relation]] = {}
         for relation in relations:
             incident.setdefault(relation.source_entity_id, []).append(relation)
@@ -226,32 +308,34 @@ class InMemoryGraphRepository:
             )
         return tuple(expansions)
 
-    def remove_evidence(self, chunk_ids: tuple[str, ...]) -> None:
+    def remove_evidence(self, chunk_ids: tuple[str, ...], workspace_id: str) -> None:
         removed = set(chunk_ids)
         with self._lock:
             updated = {}
             for relation_id, relation in self._relations.items():
+                if relation.workspace_id != workspace_id:
+                    updated[relation_id] = relation
+                    continue
                 remaining = tuple(
                     chunk_id
                     for chunk_id in relation.evidence_chunk_ids
                     if chunk_id not in removed
                 )
                 if remaining:
-                    updated[relation_id] = Relation(
-                        id=relation.id,
-                        source_entity_id=relation.source_entity_id,
-                        target_entity_id=relation.target_entity_id,
-                        type=relation.type,
-                        evidence_chunk_ids=remaining,
+                    updated[relation_id] = replace(
+                        relation, evidence_chunk_ids=remaining
                     )
             self._relations = updated
 
-    def delete_outgoing_relations(self, entity_id: str) -> None:
+    def delete_outgoing_relations(self, entity_id: str, workspace_id: str) -> None:
         with self._lock:
             self._relations = {
                 relation_id: relation
                 for relation_id, relation in self._relations.items()
-                if relation.source_entity_id != entity_id
+                if not (
+                    relation.source_entity_id == entity_id
+                    and relation.workspace_id == workspace_id
+                )
             }
 
 
@@ -279,43 +363,11 @@ class SQLiteGraphRepository:
 
     def upsert_entity(self, entity: Entity) -> None:
         with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO entities (id, name, type)
-                VALUES (?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type
-                """,
-                (entity.id, entity.name, entity.type),
-            )
+            self._write_entities((entity,))
 
     def upsert_relation(self, relation: Relation) -> None:
         with self._lock, self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO relations (id, source_entity_id, target_entity_id, type)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    source_entity_id = excluded.source_entity_id,
-                    target_entity_id = excluded.target_entity_id,
-                    type = excluded.type
-                """,
-                (
-                    relation.id,
-                    relation.source_entity_id,
-                    relation.target_entity_id,
-                    relation.type,
-                ),
-            )
-            self._connection.execute(
-                "DELETE FROM relation_evidence WHERE relation_id = ?", (relation.id,)
-            )
-            self._connection.executemany(
-                """
-                INSERT OR IGNORE INTO relation_evidence (relation_id, chunk_id)
-                VALUES (?, ?)
-                """,
-                ((relation.id, chunk_id) for chunk_id in relation.evidence_chunk_ids),
-            )
+            self._write_relations((relation,))
 
     def replace_outgoing_graph(
         self,
@@ -325,121 +377,129 @@ class SQLiteGraphRepository:
     ) -> None:
         entities = {source.id: source, **{entity.id: entity for entity in targets}}
         with self._lock, self._connection:
-            self._connection.executemany(
-                """
-                INSERT INTO entities (id, name, type)
-                VALUES (?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type
-                """,
-                ((entity.id, entity.name, entity.type) for entity in entities.values()),
-            )
+            self._write_entities(tuple(entities.values()))
+            # 只清掉这个 Workspace 里从 source 出发的边：同名实体在别的
+            # Workspace 里的出边与本次导入无关。
             self._connection.execute(
-                "DELETE FROM relations WHERE source_entity_id = ?", (source.id,)
+                "DELETE FROM relations WHERE source_entity_id = ? AND workspace_id = ?",
+                (source.id, source.workspace_id),
             )
-            self._connection.executemany(
-                """
-                INSERT INTO relations (id, source_entity_id, target_entity_id, type)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    (
-                        relation.id,
-                        relation.source_entity_id,
-                        relation.target_entity_id,
-                        relation.type,
-                    )
-                    for relation in relations
-                ),
-            )
-            self._connection.executemany(
-                """
-                INSERT INTO relation_evidence (relation_id, chunk_id)
-                VALUES (?, ?)
-                """,
-                (
-                    (relation.id, chunk_id)
-                    for relation in relations
-                    for chunk_id in relation.evidence_chunk_ids
-                ),
-            )
+            self._write_relations(relations)
 
-    def get_entity(self, entity_id: str) -> Entity | None:
+    def get_entity(self, entity_id: str, workspace_id: str) -> Entity | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT id, name, type FROM entities WHERE id = ?", (entity_id,)
+                """
+                SELECT id, name, type, workspace_id FROM entities
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (entity_id, workspace_id),
             ).fetchone()
         return _entity_from_row(row) if row else None
 
-    def search_entities(self, query: str, limit: int = 5) -> tuple[Entity, ...]:
+    def find_entity_by_key(
+        self, workspace_id: str, entity_type: str, normalized_name: str
+    ) -> Entity | None:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT id, name, type FROM entities"
+                """
+                SELECT id, name, type, workspace_id FROM entities
+                WHERE workspace_id = ? AND LOWER(type) = LOWER(?)
+                ORDER BY id
+                """,
+                (workspace_id, entity_type),
+            ).fetchall()
+        # 规范化只在 Python 侧有一份实现（去首尾标点需要它），所以这里按 Workspace
+        # 与类型先缩到很小的候选集，再逐个比对规范名称；换后端不会换匹配结果。
+        # 类型大小写不敏感：稳定 ID 也是把类型 casefold 之后算出来的，两个口径
+        # 必须一致，否则同一个实体在「按 ID 找」与「按名称找」下会落到两个节点。
+        for row in rows:
+            if normalize_name(row["name"]) == normalized_name:
+                return _entity_from_row(row)
+        return None
+
+    def search_entities(
+        self, query: str, workspace_id: str, limit: int = 5
+    ) -> tuple[Entity, ...]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT id, name, type, workspace_id FROM entities WHERE workspace_id = ?",
+                (workspace_id,),
             ).fetchall()
         return rank_entities(tuple(_entity_from_row(row) for row in rows), query, limit)
 
     def list_relations(
-        self, entity_ids: tuple[str, ...], limit: int = 20
+        self, entity_ids: tuple[str, ...], workspace_id: str, limit: int = 20
     ) -> tuple[Relation, ...]:
         if not entity_ids:
             return ()
         placeholders = ",".join("?" for _ in entity_ids)
-        parameters = (*entity_ids, *entity_ids, limit)
+        # workspace_id 必须写进 OR 的每一支。写成 `(... OR ...) AND workspace_id = ?`
+        # 时 SQLite 用不上「多索引 OR」，只能退化成按 workspace_id 全表扫一遍
+        # relations —— 真实图谱有几十万条边，每次检索都会卡住一秒。
+        parameters = (*entity_ids, workspace_id, *entity_ids, workspace_id, limit)
         with self._lock:
             rows = self._connection.execute(
                 f"""
                 SELECT id, source_entity_id, target_entity_id, type
                 FROM relations
-                WHERE source_entity_id IN ({placeholders})
-                   OR target_entity_id IN ({placeholders})
+                WHERE (source_entity_id IN ({placeholders}) AND workspace_id = ?)
+                   OR (target_entity_id IN ({placeholders}) AND workspace_id = ?)
                 ORDER BY id
                 LIMIT ?
                 """,
                 parameters,
             ).fetchall()
-            relations = []
-            for row in rows:
-                evidence_rows = self._connection.execute(
-                    """
-                    SELECT chunk_id FROM relation_evidence
-                    WHERE relation_id = ? ORDER BY chunk_id
-                    """,
-                    (row["id"],),
-                ).fetchall()
-                relations.append(
-                    Relation(
-                        id=row["id"],
-                        source_entity_id=row["source_entity_id"],
-                        target_entity_id=row["target_entity_id"],
-                        type=row["type"],
-                        evidence_chunk_ids=tuple(
-                            evidence["chunk_id"] for evidence in evidence_rows
-                        ),
-                    )
-                )
-        return tuple(relations)
+            evidence = _load_relation_evidence(
+                self._connection, tuple(row["id"] for row in rows)
+            )
+        return tuple(
+            _relation_from_row(row, workspace_id, evidence.get(row["id"], ()))
+            for row in rows
+        )
 
-    def get_relation(self, relation_id: str) -> Relation | None:
+    def get_relation(self, relation_id: str, workspace_id: str) -> Relation | None:
         with self._lock:
             row = self._connection.execute(
                 """
                 SELECT id, source_entity_id, target_entity_id, type
-                FROM relations WHERE id = ?
+                FROM relations WHERE id = ? AND workspace_id = ?
                 """,
-                (relation_id,),
+                (relation_id, workspace_id),
             ).fetchone()
             if row is None:
                 return None
             evidence = _load_relation_evidence(self._connection, (relation_id,))
-        return Relation(
-            id=row["id"],
-            source_entity_id=row["source_entity_id"],
-            target_entity_id=row["target_entity_id"],
-            type=row["type"],
-            evidence_chunk_ids=evidence.get(relation_id, ()),
-        )
+        return _relation_from_row(row, workspace_id, evidence.get(relation_id, ()))
+
+    def find_relation_by_key(
+        self,
+        workspace_id: str,
+        source_entity_id: str,
+        relation_type: str,
+        target_entity_id: str,
+    ) -> Relation | None:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT id, source_entity_id, target_entity_id, type
+                FROM relations
+                WHERE workspace_id = ?
+                  AND source_entity_id = ?
+                  AND target_entity_id = ?
+                  AND LOWER(type) = LOWER(?)
+                ORDER BY id
+                LIMIT 1
+                """,
+                (workspace_id, source_entity_id, target_entity_id, relation_type),
+            ).fetchone()
+            if row is None:
+                return None
+            evidence = _load_relation_evidence(self._connection, (row["id"],))
+        return _relation_from_row(row, workspace_id, evidence.get(row["id"], ()))
 
     def find_opposing_relations(
-        self, entity_id: str, relation_types: tuple[str, str]
+        self, entity_id: str, relation_types: tuple[str, str], workspace_id: str
     ) -> tuple[Relation, ...]:
         first, second = relation_types
         with self._lock:
@@ -453,8 +513,10 @@ class SQLiteGraphRepository:
                 WHERE first.source_entity_id = ?
                   AND first.type = ?
                   AND second.type = ?
+                  AND first.workspace_id = ?
+                  AND second.workspace_id = ?
                 """,
-                (entity_id, first, second),
+                (entity_id, first, second, workspace_id, workspace_id),
             ).fetchall()
             if not rows:
                 return ()
@@ -475,24 +537,19 @@ class SQLiteGraphRepository:
                 relation_ids,
             ).fetchall()
         return tuple(
-            Relation(
-                id=row["id"],
-                source_entity_id=row["source_entity_id"],
-                target_entity_id=row["target_entity_id"],
-                type=row["type"],
-                evidence_chunk_ids=evidence.get(row["id"], ()),
-            )
+            _relation_from_row(row, workspace_id, evidence.get(row["id"], ()))
             for row in details
         )
 
-    def statistics(self) -> GraphStatistics:
+    def statistics(self, workspace_id: str) -> GraphStatistics:
         with self._lock:
-            return sqlite_graph_statistics(self._connection)
+            return sqlite_graph_statistics(self._connection, workspace_id)
 
     def expand_frontier(
         self,
         node_ids: tuple[str, ...],
         *,
+        workspace_id: str,
         fanout: int,
         relation_types: tuple[str, ...] | None = None,
         direction: TraversalDirection | None = None,
@@ -517,6 +574,7 @@ class SQLiteGraphRepository:
 
         parameters: list[object] = [*node_ids]
         for _ in branches:
+            parameters.append(workspace_id)
             parameters.extend(type_params)
         parameters.append(fanout)
         with self._lock:
@@ -538,32 +596,133 @@ class SQLiteGraphRepository:
                 """,
                 parameters,
             ).fetchall()
-            return _build_expansions(self._connection, node_ids, rows)
+            return _build_expansions(self._connection, node_ids, rows, workspace_id)
 
-    def remove_evidence(self, chunk_ids: tuple[str, ...]) -> None:
+    def remove_evidence(self, chunk_ids: tuple[str, ...], workspace_id: str) -> None:
         if not chunk_ids:
             return
         placeholders = ",".join("?" for _ in chunk_ids)
         with self._lock, self._connection:
+            # 只删这个 Workspace 的关系证据：别的 Workspace 可能引用同一批
+            # Chunk ID（同一份文档被两个 Workspace 各自入库时）。
             self._connection.execute(
-                f"DELETE FROM relation_evidence WHERE chunk_id IN ({placeholders})",
-                chunk_ids,
+                f"""
+                DELETE FROM relation_evidence
+                WHERE chunk_id IN ({placeholders})
+                  AND relation_id IN (
+                      SELECT id FROM relations WHERE workspace_id = ?
+                  )
+                """,
+                (*chunk_ids, workspace_id),
             )
             self._connection.execute(
                 """
                 DELETE FROM relations
-                WHERE NOT EXISTS (
+                WHERE workspace_id = ?
+                  AND NOT EXISTS (
                     SELECT 1 FROM relation_evidence
                     WHERE relation_evidence.relation_id = relations.id
                 )
-                """
+                """,
+                (workspace_id,),
             )
 
-    def delete_outgoing_relations(self, entity_id: str) -> None:
+    def delete_outgoing_relations(self, entity_id: str, workspace_id: str) -> None:
         with self._lock, self._connection:
             self._connection.execute(
-                "DELETE FROM relations WHERE source_entity_id = ?", (entity_id,)
+                "DELETE FROM relations WHERE source_entity_id = ? AND workspace_id = ?",
+                (entity_id, workspace_id),
             )
+
+    def _write_entities(self, entities: tuple[Entity, ...]) -> None:
+        if not entities:
+            return
+        self._connection.executemany(
+            """
+            INSERT INTO entities (id, name, type, workspace_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                type = excluded.type,
+                workspace_id = excluded.workspace_id
+            """,
+            (
+                (entity.id, entity.name, entity.type, entity.workspace_id)
+                for entity in entities
+            ),
+        )
+
+    def _require_endpoints(self, relations: tuple[Relation, ...]) -> None:
+        """关系两端必须存在，且与关系属于同一个 Workspace。
+
+        外键只保证实体「存在」，拦不住「拿 A Workspace 的实体去接 B Workspace
+        的关系」—— 那样写出来的边在两个 Workspace 里各露一半。内存后端一直
+        在写之前拒绝这种输入，SQLite 必须给出同样的结果。
+        """
+        for workspace_id in {relation.workspace_id for relation in relations}:
+            endpoint_ids = tuple(
+                {
+                    entity_id
+                    for relation in relations
+                    if relation.workspace_id == workspace_id
+                    for entity_id in (
+                        relation.source_entity_id,
+                        relation.target_entity_id,
+                    )
+                }
+            )
+            known = set(_load_entities(self._connection, endpoint_ids, workspace_id))
+            for relation in relations:
+                if relation.workspace_id != workspace_id:
+                    continue
+                if not {
+                    relation.source_entity_id,
+                    relation.target_entity_id,
+                } <= known:
+                    raise ValueError("关系的源实体不存在或不属于同一个 Workspace")
+
+    def _write_relations(self, relations: tuple[Relation, ...]) -> None:
+        if not relations:
+            return
+        self._require_endpoints(relations)
+        relation_ids = tuple(relation.id for relation in relations)
+        placeholders = ",".join("?" for _ in relation_ids)
+        self._connection.execute(
+            f"DELETE FROM relation_evidence WHERE relation_id IN ({placeholders})",
+            relation_ids,
+        )
+        self._connection.executemany(
+            """
+            INSERT INTO relations (id, source_entity_id, target_entity_id, type, workspace_id)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                source_entity_id = excluded.source_entity_id,
+                target_entity_id = excluded.target_entity_id,
+                type = excluded.type,
+                workspace_id = excluded.workspace_id
+            """,
+            (
+                (
+                    relation.id,
+                    relation.source_entity_id,
+                    relation.target_entity_id,
+                    relation.type,
+                    relation.workspace_id,
+                )
+                for relation in relations
+            ),
+        )
+        self._connection.executemany(
+            """
+            INSERT OR IGNORE INTO relation_evidence (relation_id, chunk_id)
+            VALUES (?, ?)
+            """,
+            (
+                (relation.id, chunk_id)
+                for relation in relations
+                for chunk_id in relation.evidence_chunk_ids
+            ),
+        )
 
     def _create_schema(self) -> None:
         with self._lock, self._connection:
@@ -572,14 +731,16 @@ class SQLiteGraphRepository:
                 CREATE TABLE IF NOT EXISTS entities (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
-                    type TEXT NOT NULL
+                    type TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'ws-default'
                 );
 
                 CREATE TABLE IF NOT EXISTS relations (
                     id TEXT PRIMARY KEY,
                     source_entity_id TEXT NOT NULL REFERENCES entities(id),
                     target_entity_id TEXT NOT NULL REFERENCES entities(id),
-                    type TEXT NOT NULL
+                    type TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL DEFAULT 'ws-default'
                 );
 
                 CREATE TABLE IF NOT EXISTS relation_evidence (
@@ -594,6 +755,49 @@ class SQLiteGraphRepository:
                     ON relations(target_entity_id);
                 """
             )
+            self._migrate_workspace_columns()
+            self._create_workspace_indexes()
+
+    def _migrate_workspace_columns(self) -> None:
+        """给 Workspace 概念出现之前的图索引补上归属列。
+
+        迁移只做加法：加列、把旧行归入默认 Workspace、补索引，不动任何一行
+        既有数据，也不重新导入。列定义带 `DEFAULT 'ws-default'` 是这条迁移
+        规则的物化（既有 DUTMed 数据全部属于默认 Workspace），新库用的是同一
+        份定义，因此两条路径得到完全相同的 schema；仓储的每个写入方法都显式
+        写出 workspace_id，这个默认值在代码路径上取不到。
+
+        重复执行不做任何事：列已经存在时直接返回。
+        """
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(entities)")
+        }
+        if "workspace_id" in columns:
+            return
+        self._connection.executescript(
+            f"""
+            ALTER TABLE entities
+                ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE_ID}';
+            ALTER TABLE relations
+                ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '{DEFAULT_WORKSPACE_ID}';
+            UPDATE entities SET workspace_id = '{DEFAULT_WORKSPACE_ID}'
+                WHERE workspace_id IS NULL;
+            UPDATE relations SET workspace_id = '{DEFAULT_WORKSPACE_ID}'
+                WHERE workspace_id IS NULL;
+            """
+        )
+
+    def _create_workspace_indexes(self) -> None:
+        self._connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS entities_workspace_idx
+                ON entities(workspace_id, type);
+            CREATE INDEX IF NOT EXISTS relations_workspace_source_idx
+                ON relations(workspace_id, source_entity_id);
+            CREATE INDEX IF NOT EXISTS relations_workspace_target_idx
+                ON relations(workspace_id, target_entity_id);
+            """
+        )
 
 
 def _empty_expansions(node_ids: tuple[str, ...]) -> tuple[FrontierExpansion, ...]:
@@ -604,14 +808,17 @@ def _empty_expansions(node_ids: tuple[str, ...]) -> tuple[FrontierExpansion, ...
 
 
 def _load_entities(
-    connection: sqlite3.Connection, entity_ids: tuple[str, ...]
+    connection: sqlite3.Connection, entity_ids: tuple[str, ...], workspace_id: str
 ) -> dict[str, Entity]:
     if not entity_ids:
         return {}
     placeholders = ",".join("?" for _ in entity_ids)
     rows = connection.execute(
-        f"SELECT id, name, type FROM entities WHERE id IN ({placeholders})",
-        entity_ids,
+        f"""
+        SELECT id, name, type, workspace_id FROM entities
+        WHERE id IN ({placeholders}) AND workspace_id = ?
+        """,
+        (*entity_ids, workspace_id),
     ).fetchall()
     return {row["id"]: _entity_from_row(row) for row in rows}
 
@@ -640,12 +847,15 @@ def _build_expansions(
     connection: sqlite3.Connection,
     node_ids: tuple[str, ...],
     rows: list[sqlite3.Row],
+    workspace_id: str,
 ) -> tuple[FrontierExpansion, ...]:
     totals = {node_id: 0 for node_id in node_ids}
     steps_by_node: dict[str, list[PathStep]] = {node_id: [] for node_id in node_ids}
     if rows:
         entities = _load_entities(
-            connection, tuple(sorted({row["neighbor_id"] for row in rows}))
+            connection,
+            tuple(sorted({row["neighbor_id"] for row in rows})),
+            workspace_id,
         )
         evidence = _load_relation_evidence(
             connection, tuple(sorted({row["relation_id"] for row in rows}))
@@ -664,6 +874,7 @@ def _build_expansions(
                         target_entity_id=row["target_entity_id"],
                         type=row["relation_type"],
                         evidence_chunk_ids=chunk_ids,
+                        workspace_id=workspace_id,
                     ),
                     direction=TraversalDirection(row["direction"]),
                     target=target,
@@ -719,23 +930,38 @@ def _statistics(
     )
 
 
-def sqlite_graph_statistics(connection: sqlite3.Connection) -> GraphStatistics:
-    """图表的规模概览；一致性检查命令复用同一份查询。"""
+def sqlite_graph_statistics(
+    connection: sqlite3.Connection, workspace_id: str
+) -> GraphStatistics:
+    """某个 Workspace 的图规模概览；一致性检查命令复用同一份查询。"""
     entity_rows = connection.execute(
-        "SELECT type, COUNT(*) AS total FROM entities GROUP BY type"
+        "SELECT type, COUNT(*) AS total FROM entities WHERE workspace_id = ? GROUP BY type",
+        (workspace_id,),
     ).fetchall()
     relation_rows = connection.execute(
-        "SELECT type, COUNT(*) AS total FROM relations GROUP BY type"
+        "SELECT type, COUNT(*) AS total FROM relations WHERE workspace_id = ? GROUP BY type",
+        (workspace_id,),
     ).fetchall()
+    # 两个 NOT EXISTS 而不是一个带 OR 的：`NOT EXISTS(A OR B)` 与
+    # `NOT EXISTS(A) AND NOT EXISTS(B)` 等价，但 SQLite 拆不开 OR 里共用的
+    # workspace_id，只能对每个实体全表扫一遍 relations —— 真实图谱上这个查询
+    # 会跑上几分钟。拆开之后两支都走 (workspace_id, 端点) 覆盖索引。
     orphans = connection.execute(
         """
         SELECT COUNT(*) AS total FROM entities
-        WHERE NOT EXISTS (
+        WHERE workspace_id = ?
+          AND NOT EXISTS (
             SELECT 1 FROM relations
-            WHERE relations.source_entity_id = entities.id
-               OR relations.target_entity_id = entities.id
+            WHERE relations.workspace_id = entities.workspace_id
+              AND relations.source_entity_id = entities.id
         )
-        """
+          AND NOT EXISTS (
+            SELECT 1 FROM relations
+            WHERE relations.workspace_id = entities.workspace_id
+              AND relations.target_entity_id = entities.id
+        )
+        """,
+        (workspace_id,),
     ).fetchone()["total"]
     return GraphStatistics(
         entities=sum(row["total"] for row in entity_rows),
@@ -758,4 +984,22 @@ def _type_counts(rows: Iterable[sqlite3.Row]) -> tuple[tuple[str, int], ...]:
 
 
 def _entity_from_row(row: sqlite3.Row) -> Entity:
-    return Entity(id=row["id"], name=row["name"], type=row["type"])
+    return Entity(
+        id=row["id"],
+        name=row["name"],
+        type=row["type"],
+        workspace_id=row["workspace_id"],
+    )
+
+
+def _relation_from_row(
+    row: sqlite3.Row, workspace_id: str, evidence_chunk_ids: tuple[str, ...]
+) -> Relation:
+    return Relation(
+        id=row["id"],
+        source_entity_id=row["source_entity_id"],
+        target_entity_id=row["target_entity_id"],
+        type=row["type"],
+        evidence_chunk_ids=evidence_chunk_ids,
+        workspace_id=workspace_id,
+    )

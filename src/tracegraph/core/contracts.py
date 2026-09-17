@@ -74,6 +74,10 @@ class Document:
     media_type: str
     # 每个 Document 都必须归属一个 Workspace：没有「无归属」的文档。
     workspace_id: str
+    # 入库与最后一次写入的时间。既有 DUTMed 文档没有留下时间，迁移时只能
+    # 留空：宁可空着，也不要凭空造一个时间出来。
+    created_at: str = ""
+    updated_at: str = ""
 
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.source_name.strip():
@@ -96,6 +100,8 @@ class DocumentVersion:
     # 相对存储根目录的路径，不是绝对路径：数据目录搬家后仍然可解析。
     stored_path: str | None = None
     original_filename: str | None = None
+    # 与 Document 同理：旧版本的入库时间无从追溯，留空。
+    created_at: str = ""
 
     def __post_init__(self) -> None:
         if self.number < 1:
@@ -154,13 +160,23 @@ class IngestionJob:
 
 @dataclass(frozen=True, slots=True)
 class Entity:
+    """图中的一个实体；归属的 Workspace 是它的一部分，不是外部上下文。
+
+    默认值只服务于 Workspace 概念出现之前的 DUTMed 数据 —— 那批数据全部属于
+    默认 Workspace。图仓储的每个读写方法仍然显式要求 workspace_id，因此
+    「实体自带归属」不会被用来绕过方法参数上的隔离。
+    """
+
     id: str
     name: str
     type: str
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.name.strip() or not self.type.strip():
             raise ValueError("Entity requires non-empty id, name, and type")
+        if not self.workspace_id.strip():
+            raise ValueError("Entity requires a non-empty workspace_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +186,7 @@ class Relation:
     target_entity_id: str
     type: str
     evidence_chunk_ids: tuple[str, ...]
+    workspace_id: str = DEFAULT_WORKSPACE_ID
 
     def __post_init__(self) -> None:
         if not all(
@@ -182,6 +199,8 @@ class Relation:
             )
         ):
             raise ValueError("Relation requires non-empty identity fields")
+        if not self.workspace_id.strip():
+            raise ValueError("Relation requires a non-empty workspace_id")
         if not self.evidence_chunk_ids:
             raise ValueError("Relation requires at least one evidence Chunk")
 
@@ -535,6 +554,24 @@ def _require_candidate_scope(
         raise ValueError("候选知识的证据 Chunk 不能重复")
 
 
+def _require_publication_pair(
+    published_at: str | None, graph_id: str | None, status: CandidateStatus
+) -> None:
+    """发布状态的唯一判据是 `published_at`，它与图落点必须同进同退。
+
+    只有已批准的候选能被发布，所以「已发布但状态不是 approved」是矛盾状态：
+    它只可能来自绕过审核服务直接标记发布的写入。
+    """
+    if (published_at is None) != (graph_id is None):
+        raise ValueError("候选的 published_at 与 graph_id 必须同时存在或同时为空")
+    if published_at is None:
+        return
+    if not published_at.strip() or not graph_id.strip():
+        raise ValueError("候选的 published_at 与 graph_id 不能为空")
+    if status is not CandidateStatus.APPROVED:
+        raise ValueError("只有已批准的候选才能处于已发布状态")
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateEntity:
     id: str
@@ -551,6 +588,11 @@ class CandidateEntity:
     created_at: str
     updated_at: str
     status: CandidateStatus = CandidateStatus.PENDING
+    # 发布状态与审核状态是两个概念，因此不挤进 `status`：已批准的候选可以
+    # 还没发布，发布过的候选也不会因此变成一个"新的审核状态"。两者同时
+    # 为空表示还没发布；`graph_id` 是它在图后端的落点。
+    published_at: str | None = None
+    graph_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_candidate_scope(
@@ -565,8 +607,13 @@ class CandidateEntity:
             created_at=self.created_at,
             updated_at=self.updated_at,
         )
+        _require_publication_pair(self.published_at, self.graph_id, self.status)
         if not self.name.strip() or not self.normalized_name.strip():
             raise ValueError("候选实体必须有非空名称")
+
+    @property
+    def is_published(self) -> bool:
+        return self.published_at is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,6 +632,8 @@ class CandidateRelation:
     created_at: str
     updated_at: str
     status: CandidateStatus = CandidateStatus.PENDING
+    published_at: str | None = None
+    graph_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_candidate_scope(
@@ -599,10 +648,15 @@ class CandidateRelation:
             created_at=self.created_at,
             updated_at=self.updated_at,
         )
+        _require_publication_pair(self.published_at, self.graph_id, self.status)
         if not self.source_entity_id.strip() or not self.target_entity_id.strip():
             raise ValueError("候选关系必须给出两端的候选实体")
         if self.source_entity_id == self.target_entity_id:
             raise ValueError("候选关系不允许自环")
+
+    @property
+    def is_published(self) -> bool:
+        return self.published_at is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,3 +674,61 @@ class CandidateEvidence:
     def __post_init__(self) -> None:
         if not self.candidate_id.strip() or not self.chunk_id.strip():
             raise ValueError("证据关联必须给出候选 ID 与 Chunk ID")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateTally:
+    """一个文档名下的候选概览。
+
+    审核状态三选一，因此前三项相加是候选总数；`published` 与它们正交 ——
+    已发布的候选同时仍然是已批准的那一条，不会被算成第四种审核状态。
+    """
+
+    pending: int = 0
+    approved: int = 0
+    rejected: int = 0
+    published: int = 0
+
+    def __post_init__(self) -> None:
+        if min(self.pending, self.approved, self.rejected, self.published) < 0:
+            raise ValueError("候选计数不能为负")
+        if self.published > self.approved:
+            raise ValueError("已发布的候选数不能超过已批准数")
+
+    @property
+    def total(self) -> int:
+        return self.pending + self.approved + self.rejected
+
+
+@dataclass(frozen=True, slots=True)
+class PublicationOutcome:
+    """一次发布的结果：新建、复用与幂等跳过的图对象各有多少。"""
+
+    created_entity_ids: tuple[str, ...] = ()
+    reused_entity_ids: tuple[str, ...] = ()
+    skipped_entity_ids: tuple[str, ...] = ()
+    created_relation_ids: tuple[str, ...] = ()
+    reused_relation_ids: tuple[str, ...] = ()
+    skipped_relation_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for group in (
+            self.created_entity_ids,
+            self.reused_entity_ids,
+            self.skipped_entity_ids,
+            self.created_relation_ids,
+            self.reused_relation_ids,
+            self.skipped_relation_ids,
+        ):
+            if len(set(group)) != len(group):
+                raise ValueError("发布结果里的图对象 ID 不能重复")
+
+    def to_counts(self) -> dict[str, int]:
+        return {
+            "entities_created": len(self.created_entity_ids),
+            "entities_reused": len(self.reused_entity_ids),
+            "entities_skipped": len(self.skipped_entity_ids),
+            "relations_created": len(self.created_relation_ids),
+            "relations_reused": len(self.reused_relation_ids),
+            "relations_skipped": len(self.skipped_relation_ids),
+        }

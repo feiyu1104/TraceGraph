@@ -1,4 +1,5 @@
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
 import uuid
@@ -113,6 +114,8 @@ class TextIngestionService:
             raise ValueError("未装配原件存储，无法保存原件")
 
         drafts = split_text(content, self.chunk_size)
+        # 入库时间由服务层打：仓储层只负责存，不负责判断「现在几点」。
+        ingested_at = datetime.now(UTC).isoformat()
         document = self.repository.get_document_by_source(normalized_source, workspace_id)
         if document is None:
             document = Document(
@@ -121,6 +124,8 @@ class TextIngestionService:
                 source_name=normalized_source,
                 media_type=_media_type(normalized_source),
                 workspace_id=workspace_id,
+                created_at=ingested_at,
+                updated_at=ingested_at,
             )
             self.repository.save_document(document)
 
@@ -145,6 +150,7 @@ class TextIngestionService:
             document_id=document.id,
             number=version_number,
             content_sha256=content_hash,
+            created_at=ingested_at,
         )
         chunks = tuple(
             Chunk(

@@ -1,8 +1,17 @@
 import pytest
 
-from tracegraph.core.contracts import Entity, Relation, TraversalDirection
+from tracegraph.core.contracts import (
+    DEFAULT_WORKSPACE_ID,
+    Entity,
+    Relation,
+    TraversalDirection,
+)
 from tracegraph.retrieval.traversal import traverse_paths
 from tracegraph.storage.graph import InMemoryGraphRepository
+
+
+# 图测试全部落在默认 Workspace 里；跨 Workspace 的隔离由隔离用例覆盖。
+WORKSPACE = DEFAULT_WORKSPACE_ID
 
 
 def _build() -> tuple[InMemoryGraphRepository, dict[str, Entity]]:
@@ -35,7 +44,7 @@ def _build() -> tuple[InMemoryGraphRepository, dict[str, Entity]]:
 def test_single_hop_lists_every_incident_relation() -> None:
     graph, entities = _build()
 
-    paths = traverse_paths(graph, entities["d1"], max_hops=1)
+    paths = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=1)
 
     assert {path.steps[0].relation.id for path in paths} == {"r1", "r3", "r5", "r8"}
     assert all(path.hop_count == 1 for path in paths)
@@ -44,7 +53,7 @@ def test_single_hop_lists_every_incident_relation() -> None:
 def test_self_loop_never_becomes_a_path() -> None:
     graph, entities = _build()
 
-    paths = traverse_paths(graph, entities["d1"], max_hops=3)
+    paths = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=3)
 
     assert all("r7" not in {step.relation.id for step in path.steps} for path in paths)
 
@@ -52,7 +61,7 @@ def test_self_loop_never_becomes_a_path() -> None:
 def test_two_hops_reach_the_expected_association() -> None:
     graph, entities = _build()
 
-    paths = traverse_paths(graph, entities["d1"], max_hops=2)
+    paths = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=2)
     two_hop = {
         tuple(step.relation.id for step in path.steps)
         for path in paths
@@ -68,7 +77,7 @@ def test_two_hops_reach_the_expected_association() -> None:
 def test_paths_never_repeat_a_node() -> None:
     graph, entities = _build()
 
-    paths = traverse_paths(graph, entities["d1"], max_hops=3)
+    paths = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=3)
 
     for path in paths:
         node_ids = [node.id for node in path.nodes]
@@ -78,7 +87,7 @@ def test_paths_never_repeat_a_node() -> None:
 def test_deeper_hop_levels_are_not_starved_by_shallower_ones() -> None:
     graph, entities = _build()
 
-    paths = traverse_paths(graph, entities["d1"], max_hops=3, limit=2)
+    paths = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=3, limit=2)
 
     # 逐层限额是每层 2 条；若在末尾统一截断，三跳会被整体丢掉。
     assert {path.hop_count for path in paths} == {1, 2, 3}
@@ -87,7 +96,7 @@ def test_deeper_hop_levels_are_not_starved_by_shallower_ones() -> None:
 def test_fanout_truncation_is_reported_with_real_edge_count() -> None:
     graph, entities = _build()
 
-    path = traverse_paths(graph, entities["d1"], max_hops=1, fanout=2)[0]
+    path = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=1, fanout=2)[0]
 
     truncation = path.truncations[0]
     assert truncation.entity_id == "d1"
@@ -99,7 +108,7 @@ def test_relation_type_filter_applies_to_every_hop() -> None:
     graph, entities = _build()
 
     paths = traverse_paths(
-        graph, entities["d1"], max_hops=2, relation_types=("RECOMMENDS_DRUG",)
+        graph, entities["d1"], workspace_id=WORKSPACE, max_hops=2, relation_types=("RECOMMENDS_DRUG",)
     )
 
     assert {path.steps[0].relation.type for path in paths} == {"RECOMMENDS_DRUG"}
@@ -110,10 +119,10 @@ def test_direction_filter_restricts_expansion() -> None:
     graph, entities = _build()
 
     outgoing = traverse_paths(
-        graph, entities["d1"], max_hops=1, direction=TraversalDirection.OUTGOING
+        graph, entities["d1"], workspace_id=WORKSPACE, max_hops=1, direction=TraversalDirection.OUTGOING
     )
     incoming = traverse_paths(
-        graph, entities["d1"], max_hops=1, direction=TraversalDirection.INCOMING
+        graph, entities["d1"], workspace_id=WORKSPACE, max_hops=1, direction=TraversalDirection.INCOMING
     )
 
     assert {path.steps[0].relation.id for path in outgoing} == {"r1", "r3", "r5"}
@@ -123,8 +132,8 @@ def test_direction_filter_restricts_expansion() -> None:
 def test_traversal_is_deterministic() -> None:
     graph, entities = _build()
 
-    first = traverse_paths(graph, entities["d1"], max_hops=3)
-    second = traverse_paths(graph, entities["d1"], max_hops=3)
+    first = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=3)
+    second = traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=3)
 
     assert first == second
 
@@ -133,6 +142,6 @@ def test_max_hops_out_of_range_is_rejected() -> None:
     graph, entities = _build()
 
     with pytest.raises(ValueError, match="max_hops"):
-        traverse_paths(graph, entities["d1"], max_hops=4)
+        traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=4)
     with pytest.raises(ValueError, match="max_hops"):
-        traverse_paths(graph, entities["d1"], max_hops=0)
+        traverse_paths(graph, entities["d1"], workspace_id=WORKSPACE, max_hops=0)

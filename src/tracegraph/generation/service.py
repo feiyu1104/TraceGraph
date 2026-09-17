@@ -211,7 +211,9 @@ class AnswerService:
         if subject_id is None:
             return False
         return bool(
-            self.graph.find_opposing_relations(subject_id, _OPPOSING_RELATION_TYPES)
+            self.graph.find_opposing_relations(
+                subject_id, _OPPOSING_RELATION_TYPES, self.workspace_id
+            )
         )
 
 

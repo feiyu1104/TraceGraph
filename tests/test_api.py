@@ -191,7 +191,7 @@ def test_relation_evidence_endpoint_returns_source_text() -> None:
     application = _graph_app()
 
     response = anyio.run(
-        get_from, application, "/graph/relations/r1/evidence"
+        get_from, application, "/graph/relations/r1/evidence?workspace_id=ws-default"
     )
     body = response.json()
 
@@ -204,7 +204,7 @@ def test_relation_evidence_endpoint_returns_source_text() -> None:
 def test_unknown_relation_evidence_returns_not_found() -> None:
     application = _graph_app()
 
-    response = anyio.run(get_from, application, "/graph/relations/missing/evidence")
+    response = anyio.run(get_from, application, "/graph/relations/missing/evidence?workspace_id=ws-default")
 
     assert response.status_code == 404
 
@@ -212,7 +212,7 @@ def test_unknown_relation_evidence_returns_not_found() -> None:
 def test_graph_endpoints_are_unavailable_without_a_graph_backend() -> None:
     application = create_app(InMemoryDocumentRepository())
 
-    response = anyio.run(get_from, application, "/graph/relations/r1/evidence")
+    response = anyio.run(get_from, application, "/graph/relations/r1/evidence?workspace_id=ws-default")
 
     assert response.status_code == 503
 
@@ -242,12 +242,12 @@ def test_errors_carry_a_machine_readable_code() -> None:
 
     # 缺少图后端。
     without_graph = create_app(InMemoryDocumentRepository())
-    unavailable = anyio.run(get_from, without_graph, "/graph/entities?query=苯中毒")
+    unavailable = anyio.run(get_from, without_graph, "/graph/entities?workspace_id=ws-default&query=苯中毒")
     assert unavailable.status_code == 503
     assert unavailable.json()["error_code"] == "graph_unavailable"
 
     # 不存在的资源。
-    missing = anyio.run(get_from, application, "/graph/relations/missing/evidence")
+    missing = anyio.run(get_from, application, "/graph/relations/missing/evidence?workspace_id=ws-default")
     assert missing.json()["error_code"] == "not_found"
 
 

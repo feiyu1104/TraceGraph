@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 from tracegraph.config import load_local_env
-from tracegraph.core.contracts import GraphStatistics
+from tracegraph.core.contracts import DEFAULT_WORKSPACE_ID, GraphStatistics
 from tracegraph.domains.medical.importer import MedicalRecordImporter
 from tracegraph.graph_backend import create_graph_repository
 from tracegraph.storage.consistency import check_sqlite_consistency
@@ -25,17 +25,20 @@ def main() -> None:
 
     stats = commands.add_parser("graph-stats", help="打印图后端规模概览与类型分布")
     stats.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    stats.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
 
     consistency = commands.add_parser(
         "check-consistency", help="检查图侧证据引用与文档侧 chunk 是否一致"
     )
     consistency.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    consistency.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
 
     resync = commands.add_parser(
         "resync-graph", help="按当前图后端重跑导入，并对比导入前后的图统计"
     )
     resync.add_argument("--source", type=Path, required=True)
     resync.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    resync.add_argument("--workspace", default=DEFAULT_WORKSPACE_ID)
     resync.add_argument("--limit", type=int)
 
     args = parser.parse_args()
@@ -43,11 +46,11 @@ def main() -> None:
     if args.command == "import-medical":
         _import_medical(parser, args.database, args.source, args.limit)
     elif args.command == "graph-stats":
-        _graph_stats(parser, args.database)
+        _graph_stats(parser, args.database, args.workspace)
     elif args.command == "check-consistency":
-        _check_consistency(parser, args.database)
+        _check_consistency(parser, args.database, args.workspace)
     elif args.command == "resync-graph":
-        _resync_graph(parser, args.database, args.source, args.limit)
+        _resync_graph(parser, args.database, args.source, args.limit, args.workspace)
 
 
 def _import_medical(
@@ -68,19 +71,25 @@ def _import_medical(
     )
 
 
-def _graph_stats(parser: argparse.ArgumentParser, database: Path) -> None:
+def _graph_stats(
+    parser: argparse.ArgumentParser, database: Path, workspace_id: str
+) -> None:
     graph = _open_graph(parser, database)
     try:
-        _print_statistics(graph.statistics(), f"图后端 {graph.name}")
+        _print_statistics(
+            graph.statistics(workspace_id), f"图后端 {graph.name}（{workspace_id}）"
+        )
     finally:
         graph.close()
 
 
-def _check_consistency(parser: argparse.ArgumentParser, database: Path) -> None:
+def _check_consistency(
+    parser: argparse.ArgumentParser, database: Path, workspace_id: str
+) -> None:
     if not database.exists():
         parser.error(f"SQLite 库不存在：{database}")
-    report = check_sqlite_consistency(database)
-    _print_statistics(report.statistics, f"SQLite 库 {database}")
+    report = check_sqlite_consistency(database, workspace_id)
+    _print_statistics(report.statistics, f"SQLite 库 {database}（{workspace_id}）")
 
     dangling = report.dangling_evidence
     print(f"悬空证据引用：{len(dangling)} 条")
@@ -94,7 +103,9 @@ def _check_consistency(parser: argparse.ArgumentParser, database: Path) -> None:
     if os.getenv("TRACEGRAPH_GRAPH_BACKEND", "sqlite").casefold() == "neo4j":
         graph = _open_graph(parser, database)
         try:
-            _compare_statistics(report.statistics, graph.statistics(), graph.name)
+            _compare_statistics(
+                report.statistics, graph.statistics(workspace_id), graph.name
+            )
         finally:
             graph.close()
 
@@ -117,15 +128,19 @@ def _compare_statistics(
 
 
 def _resync_graph(
-    parser: argparse.ArgumentParser, database: Path, source: Path, limit: int | None
+    parser: argparse.ArgumentParser,
+    database: Path,
+    source: Path,
+    limit: int | None,
+    workspace_id: str,
 ) -> None:
     database.parent.mkdir(parents=True, exist_ok=True)
     documents = SQLiteDocumentRepository(database)
     graph = _open_graph(parser, database)
     try:
-        before = graph.statistics()
+        before = graph.statistics(workspace_id)
         result = MedicalRecordImporter(documents, graph).import_jsonl(source, limit)
-        after = graph.statistics()
+        after = graph.statistics(workspace_id)
     finally:
         documents.close()
         graph.close()

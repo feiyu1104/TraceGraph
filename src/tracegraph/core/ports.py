@@ -8,6 +8,7 @@ from tracegraph.core.contracts import (
     CandidateEvidence,
     CandidateRelation,
     CandidateStatus,
+    CandidateTally,
     Chunk,
     Document,
     DocumentVersion,
@@ -168,7 +169,13 @@ class Retriever(Protocol):
 
 
 class GraphRepository(Protocol):
-    """实体关系存储的最小接口。"""
+    """实体关系存储的最小接口。
+
+    所有 Workspace 共用同一个后端，隔离靠「每一次读写都显式带上归属」实现：
+    每个方法都要求 `workspace_id`，写入时也由实体的 `workspace_id` 决定它落在
+    哪里。实体 ID 不是隔离手段 —— 拿到别的 Workspace 的 ID 也读不出东西，
+    因为查询里同时钉死了 workspace_id。
+    """
 
     name: str
 
@@ -183,34 +190,61 @@ class GraphRepository(Protocol):
         relations: tuple[Relation, ...],
     ) -> None: ...
 
-    def get_entity(self, entity_id: str) -> Entity | None: ...
+    def get_entity(self, entity_id: str, workspace_id: str) -> Entity | None: ...
 
-    def search_entities(self, query: str, limit: int = 5) -> tuple[Entity, ...]: ...
+    def find_entity_by_key(
+        self, workspace_id: str, entity_type: str, normalized_name: str
+    ) -> Entity | None:
+        """按「Workspace + 类型 + 规范名称」找已有实体，没有则返回 None。
+
+        发布候选时先查这里：命中就复用已有节点，同一个 Workspace 里同名同
+        类型的实体因此不会因为来源不同而裂成两个。类型参与匹配，所以只按
+        名称合并不同类型的实体这件事在结构上就发生不了。
+        """
+        ...
+
+    def search_entities(
+        self, query: str, workspace_id: str, limit: int = 5
+    ) -> tuple[Entity, ...]: ...
 
     def list_relations(
-        self, entity_ids: tuple[str, ...], limit: int = 20
+        self, entity_ids: tuple[str, ...], workspace_id: str, limit: int = 20
     ) -> tuple[Relation, ...]: ...
 
-    def get_relation(self, relation_id: str) -> Relation | None: ...
+    def get_relation(self, relation_id: str, workspace_id: str) -> Relation | None: ...
 
-    def statistics(self) -> GraphStatistics: ...
+    def find_relation_by_key(
+        self,
+        workspace_id: str,
+        source_entity_id: str,
+        relation_type: str,
+        target_entity_id: str,
+    ) -> Relation | None:
+        """按「归属 + 两端 + 类型」找已有关系，没有则返回 None。
+
+        重复发布同一条关系时命中它并复用，因此不会多出一条边。
+        """
+        ...
+
+    def statistics(self, workspace_id: str) -> GraphStatistics: ...
 
     def find_opposing_relations(
-        self, entity_id: str, relation_types: tuple[str, str]
+        self, entity_id: str, relation_types: tuple[str, str], workspace_id: str
     ) -> tuple[Relation, ...]: ...
 
     def expand_frontier(
         self,
         node_ids: tuple[str, ...],
         *,
+        workspace_id: str,
         fanout: int,
         relation_types: tuple[str, ...] | None = None,
         direction: TraversalDirection | None = None,
     ) -> tuple[FrontierExpansion, ...]: ...
 
-    def remove_evidence(self, chunk_ids: tuple[str, ...]) -> None: ...
+    def remove_evidence(self, chunk_ids: tuple[str, ...], workspace_id: str) -> None: ...
 
-    def delete_outgoing_relations(self, entity_id: str) -> None: ...
+    def delete_outgoing_relations(self, entity_id: str, workspace_id: str) -> None: ...
 
 
 class CandidateRepository(Protocol):
@@ -262,6 +296,69 @@ class CandidateRepository(Protocol):
         status: CandidateStatus | None = None,
         relation_type: str | None = None,
     ) -> tuple[CandidateRelation, ...]: ...
+
+    def get_entity(self, candidate_id: str) -> CandidateEntity | None: ...
+
+    def get_relation(self, candidate_id: str) -> CandidateRelation | None: ...
+
+    def save_entity(self, entity: CandidateEntity) -> None:
+        """更新一条候选实体的可变字段（名称、类型、状态、发布结果）。
+
+        归属与证据不在可写列里：它们由抽取产生，审核与内容修正都改不动，
+        因此「候选的证据指向别的文档」在存储层就不可能被写出来。
+        """
+        ...
+
+    def save_relation(self, relation: CandidateRelation) -> None:
+        """更新一条候选关系的可变字段（两端、类型、状态、发布结果）。"""
+        ...
+
+    def apply_review(
+        self,
+        workspace_id: str,
+        *,
+        entity_ids: tuple[str, ...],
+        relation_ids: tuple[str, ...],
+        status: CandidateStatus,
+        updated_at: str,
+    ) -> None:
+        """把一批候选改成同一个审核状态。
+
+        单事务：任一候选不存在或不属于该 Workspace 时整批回滚，因此批量审核
+        不会留下「改了一半」的状态。
+        """
+        ...
+
+    def mark_published(
+        self,
+        workspace_id: str,
+        *,
+        entities: tuple[tuple[str, str], ...],
+        relations: tuple[tuple[str, str], ...],
+        published_at: str,
+    ) -> None:
+        """记录候选的发布结果：`(候选 ID, 图对象 ID)` 与发布时间，单事务。"""
+        ...
+
+    def has_published_candidates(self, workspace_id: str, document_id: str) -> bool:
+        """该文档名下是否已有候选发布到图后端。"""
+        ...
+
+    def tally_documents(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> dict[str, CandidateTally]:
+        """按文档统计候选数量，供文档列表接口一次取全。"""
+        ...
+
+    def documents_with_runs(
+        self, workspace_id: str, document_ids: tuple[str, ...]
+    ) -> frozenset[str]:
+        """这些文档里哪些存在抽取任务。
+
+        与 `tally_documents` 分开：失败或零产出的抽取任务没有候选，按候选推断
+        「抽过没有」会把它们漏掉。
+        """
+        ...
 
     def delete_document(self, document_id: str) -> None:
         """删除该文档名下的抽取任务与全部候选数据。"""

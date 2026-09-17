@@ -220,21 +220,25 @@ def test_personal_notes_workspace_uses_its_own_insufficient_message() -> None:
     assert payload["metrics"]["adapter_id"] == "personal-notes"
 
 
-def test_non_medical_workspace_does_not_touch_the_graph_repository() -> None:
-    class _CountingGraph(InMemoryGraphRepository):
+def test_non_medical_workspace_still_uses_the_graph_with_its_own_id() -> None:
+    """图检索不再挑 Workspace 或适配器；隔离靠每次查询都带上本次的 workspace_id。"""
+
+    class _RecordingGraph(InMemoryGraphRepository):
         def __init__(self) -> None:
             super().__init__()
-            self.calls = 0
+            self.seen: list[tuple[str, str]] = []
 
-        def search_entities(self, query: str, limit: int = 5):
-            self.calls += 1
-            return super().search_entities(query, limit)
+        def search_entities(self, query: str, workspace_id: str, limit: int = 5):
+            self.seen.append(("search_entities", workspace_id))
+            return super().search_entities(query, workspace_id, limit=limit)
 
-        def find_opposing_relations(self, entity_id: str, relation_types):
-            self.calls += 1
-            return super().find_opposing_relations(entity_id, relation_types)
+        def expand_frontier(self, node_ids, **kwargs):
+            self.seen.append(("expand_frontier", kwargs["workspace_id"]))
+            return super().expand_frontier(node_ids, **kwargs)
 
-    graph = _CountingGraph()
+    graph = _RecordingGraph()
+    # 默认 Workspace 里放一批同名实体：非医疗 Workspace 的查询不能看见它们。
+    graph.upsert_entity(Entity("d1", "血压监测", "Disease"))
     documents = _two_workspace_repository()
     application = create_app(
         documents,
@@ -253,8 +257,16 @@ def test_non_medical_workspace_does_not_touch_the_graph_repository() -> None:
     )
 
     assert response.status_code == 200
-    assert response.json()["metrics"]["retriever"] == "keyword"
-    assert graph.calls == 0
+    assert response.json()["metrics"]["retriever"] == "hybrid"
+    assert graph.seen
+    # 每一次图查询带的都是本次请求的 Workspace，一个 ws-default 都没有。
+    assert {workspace_id for _, workspace_id in graph.seen} == {"ws-a"}
+    # ws-a 里没有图实体，证据只可能来自它自己那份文档；默认 Workspace 的
+    # 同名实体既没被当成起点，也没把它的文档带进结果。
+    own_document = documents.list_documents("ws-a")[0]
+    assert {evidence["document_id"] for evidence in response.json()["evidences"]} == {
+        own_document.id
+    }
 
 
 def test_default_workspace_keeps_hybrid_retrieval_and_multi_hop() -> None:

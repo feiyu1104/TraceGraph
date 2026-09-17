@@ -62,14 +62,18 @@ class GraphRetriever:
             raise ValueError("limit 必须大于 0")
         if max_hops < 1 or max_hops > MAX_HOPS:
             raise ValueError(f"max_hops 必须在 1 到 {MAX_HOPS} 之间")
-        entities = self.graph.search_entities(query, limit=5)
+        entities = self.graph.search_entities(query, workspace_id, limit=5)
         if not entities:
             return ()
         # 起点只取 top-1，与单跳版本一致；只有起点带 rank 加成。
         entity_ranks = {entities[0].id: 0}
         intent_types = _intent_relation_types(query.casefold())
         paths = traverse_paths(
-            self.graph, entities[0], max_hops=max_hops, limit=MAX_PATHS
+            self.graph,
+            entities[0],
+            workspace_id=workspace_id,
+            max_hops=max_hops,
+            limit=MAX_PATHS,
         )
         ranked = sorted(
             paths,
@@ -100,9 +104,10 @@ class GraphRetriever:
                 version = self.documents.get_version(chunk.document_version_id)
                 if document is None or version is None:
                     continue
-                # 图索引本批仍然没有 Workspace 维度（实体与关系不带归属），
-                # 因此按证据所属文档复检一次：别的 Workspace 的文档不会因为
-                # 一条全局关系被带进本次结果。
+                # 图侧已经在 workspace_id 上过滤过，这里按证据所属文档再复检
+                # 一次：图索引与文档库是两套存储，一条归属正确的关系仍可能
+                # 引用到别的 Workspace 的 chunk（例如文档被搬迁过）。两道过滤
+                # 都过了才认为证据属于本次检索的 Workspace。
                 if document.workspace_id != workspace_id:
                     continue
                 bucket.append(

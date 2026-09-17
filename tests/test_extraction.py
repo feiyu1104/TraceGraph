@@ -609,20 +609,24 @@ def test_extraction_endpoints_report_errors(client) -> None:
     assert unknown_model.json()["error_code"] == "invalid_generator"
 
 
-def test_no_approval_or_publish_endpoint_exists(client) -> None:
-    """本批只允许读候选：审核与发布接口一个都没有。"""
+def test_candidate_write_paths_are_only_review_and_publication(client) -> None:
+    """候选的写入口只有审核与发布这几条，没有动作式路由，也没有别的发布口。"""
     paths = client.app.openapi()["paths"]
     assert {path for path in paths if "candidate" in path} == {
         "/extractions/{run_id}/candidates",
         "/workspaces/{workspace_id}/candidates",
+        "/candidate-entities/{candidate_id}",
+        "/candidate-relations/{candidate_id}",
+        "/candidates/batch-review",
     }
-    # 四个接口全是 GET 加一个 POST /extractions；没有任何写候选或发布的路由。
     for path, item in paths.items():
-        if "candidate" in path or "extraction" in path:
-            assert set(item) <= {"get", "post"}
-            assert not path.endswith("/approve") and not path.endswith("/reject")
-            assert "publish" not in path
-    assert not any(path.startswith("/candidates/") for path in paths)
+        # 审核是改状态而不是调用动作：没有 approve/reject 之类的独立路由，
+        # 因此不可能出现「绕过状态机直接置位」的入口。
+        assert not path.endswith("/approve") and not path.endswith("/reject")
+        if "publish" in path:
+            # 唯一能写图后端的路由，且它按 Workspace 收窄。
+            assert path == "/workspaces/{workspace_id}/graph-publications"
+            assert set(item) == {"post"}
 
 
 def test_deleting_a_document_removes_its_candidates(client) -> None:

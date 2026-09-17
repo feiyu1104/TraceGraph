@@ -80,7 +80,7 @@ class SQLiteDocumentRepository:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT id, source_name, media_type, workspace_id
+                SELECT id, source_name, media_type, workspace_id, created_at, updated_at
                 FROM documents
                 WHERE workspace_id = ? AND source_key = ?
                 """,
@@ -92,7 +92,7 @@ class SQLiteDocumentRepository:
         with self._lock:
             row = self._connection.execute(
                 """
-                SELECT id, source_name, media_type, workspace_id
+                SELECT id, source_name, media_type, workspace_id, created_at, updated_at
                 FROM documents
                 WHERE id = ?
                 """,
@@ -102,7 +102,7 @@ class SQLiteDocumentRepository:
 
     def list_documents(self, workspace_id: str | None = None) -> tuple[Document, ...]:
         query = """
-            SELECT id, source_name, media_type, workspace_id
+            SELECT id, source_name, media_type, workspace_id, created_at, updated_at
             FROM documents
         """
         parameters: tuple[str, ...] = ()
@@ -118,8 +118,11 @@ class SQLiteDocumentRepository:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO documents (id, source_name, source_key, media_type, workspace_id)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO documents (
+                    id, source_name, source_key, media_type, workspace_id,
+                    created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     document.id,
@@ -127,6 +130,8 @@ class SQLiteDocumentRepository:
                     document.source_name.casefold(),
                     document.media_type,
                     document.workspace_id,
+                    document.created_at or None,
+                    document.updated_at or None,
                 ),
             )
 
@@ -154,7 +159,8 @@ class SQLiteDocumentRepository:
             row = self._connection.execute(
                 """
                 SELECT id, document_id, number, content_sha256,
-                       original_sha256, original_size, stored_path, original_filename
+                       original_sha256, original_size, stored_path, original_filename,
+                       created_at
                 FROM document_versions
                 WHERE document_id = ? AND content_sha256 = ?
                 """,
@@ -167,7 +173,8 @@ class SQLiteDocumentRepository:
             rows = self._connection.execute(
                 """
                 SELECT id, document_id, number, content_sha256,
-                       original_sha256, original_size, stored_path, original_filename
+                       original_sha256, original_size, stored_path, original_filename,
+                       created_at
                 FROM document_versions
                 WHERE document_id = ?
                 ORDER BY number
@@ -181,7 +188,8 @@ class SQLiteDocumentRepository:
             row = self._connection.execute(
                 """
                 SELECT id, document_id, number, content_sha256,
-                       original_sha256, original_size, stored_path, original_filename
+                       original_sha256, original_size, stored_path, original_filename,
+                       created_at
                 FROM document_versions
                 WHERE id = ?
                 """,
@@ -225,7 +233,8 @@ class SQLiteDocumentRepository:
             row = self._connection.execute(
                 """
                 SELECT id, document_id, number, content_sha256,
-                       original_sha256, original_size, stored_path, original_filename
+                       original_sha256, original_size, stored_path, original_filename,
+                       created_at
                 FROM document_versions
                 WHERE id = ?
                 """,
@@ -313,8 +322,9 @@ class SQLiteDocumentRepository:
                 """
                 INSERT INTO document_versions (
                     id, document_id, number, content_sha256,
-                    original_sha256, original_size, stored_path, original_filename
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    original_sha256, original_size, stored_path, original_filename,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     version.id,
@@ -325,8 +335,16 @@ class SQLiteDocumentRepository:
                     version.original_size,
                     version.stored_path,
                     version.original_filename,
+                    version.created_at or None,
                 ),
             )
+            # 新版本就是文档最近一次写入，更新时间跟着走；老版本的 created_at
+            # 可能是空的（迁移前入库的），那就不要把时间倒退回去。
+            if version.created_at:
+                self._connection.execute(
+                    "UPDATE documents SET updated_at = ? WHERE id = ?",
+                    (version.created_at, version.document_id),
+                )
             self._connection.executemany(
                 """
                 INSERT INTO chunks (
@@ -380,6 +398,10 @@ class SQLiteDocumentRepository:
                     source_key TEXT NOT NULL,
                     media_type TEXT NOT NULL,
                     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                    -- 入库时间与最近一次写入时间。Workspace 概念之前入库的文档
+                    -- 无从追溯，只能是 NULL。
+                    created_at TEXT,
+                    updated_at TEXT,
                     -- 来源只在 Workspace 内唯一：不同 Workspace 允许存在同名文档。
                     UNIQUE (workspace_id, source_key)
                 );
@@ -394,6 +416,8 @@ class SQLiteDocumentRepository:
                     original_size INTEGER,
                     stored_path TEXT,
                     original_filename TEXT,
+                    -- 与 documents.created_at 同理：旧版本留 NULL。
+                    created_at TEXT,
                     UNIQUE (document_id, number),
                     UNIQUE (document_id, content_sha256)
                 );
@@ -419,6 +443,9 @@ class SQLiteDocumentRepository:
             )
             self._adopt_documents_into_workspace()
             self._adopt_version_original_columns()
+            # 必须赶在下面重建 documents 之前：重建按固定列清单搬数据，没补上
+            # 的列会连同数据一起丢掉。
+            self._adopt_timestamp_columns()
         with self._lock:
             # 重建要开关外键，而外键开关在事务内不生效，因此必须在上面的写事务提交之后。
             if not self._documents_schema_is_current():
@@ -478,6 +505,26 @@ class SQLiteDocumentRepository:
                     f"ALTER TABLE document_versions ADD COLUMN {name} {column_type}"
                 )
 
+    def _adopt_timestamp_columns(self) -> None:
+        """给既有库补上文档与版本的时间列。
+
+        同样是纯加法：ADD COLUMN 不重写表，旧行留 NULL。宁可空着也不回填
+        「现在」—— 那会把迁移的时刻冒充成入库时间。
+        """
+        for table, names in (
+            ("documents", ("created_at", "updated_at")),
+            ("document_versions", ("created_at",)),
+        ):
+            columns = {
+                row["name"]
+                for row in self._connection.execute(f"PRAGMA table_info({table})")
+            }
+            for name in names:
+                if name not in columns:
+                    self._connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} TEXT"
+                    )
+
     def _documents_schema_is_current(self) -> bool:
         """documents 是否已是「workspace_id 非空 + 来源仅在 Workspace 内唯一」。
 
@@ -531,6 +578,8 @@ class SQLiteDocumentRepository:
                         source_key TEXT NOT NULL,
                         media_type TEXT NOT NULL,
                         workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+                        created_at TEXT,
+                        updated_at TEXT,
                         UNIQUE (workspace_id, source_key)
                     )
                     """
@@ -538,9 +587,11 @@ class SQLiteDocumentRepository:
                 self._connection.execute(
                     """
                     INSERT INTO documents_rebuild (
-                        id, source_name, source_key, media_type, workspace_id
+                        id, source_name, source_key, media_type, workspace_id,
+                        created_at, updated_at
                     )
-                    SELECT id, source_name, source_key, media_type, workspace_id
+                    SELECT id, source_name, source_key, media_type, workspace_id,
+                           created_at, updated_at
                     FROM documents
                     """
                 )
@@ -568,6 +619,9 @@ def _document_from_row(row: sqlite3.Row) -> Document:
         source_name=row["source_name"],
         media_type=row["media_type"],
         workspace_id=row["workspace_id"],
+        # 旧行是 NULL，契约里时间用空串表示「没有」。
+        created_at=row["created_at"] or "",
+        updated_at=row["updated_at"] or "",
     )
 
 
@@ -590,6 +644,7 @@ def _version_from_row(row: sqlite3.Row) -> DocumentVersion:
         original_size=row["original_size"],
         stored_path=row["stored_path"],
         original_filename=row["original_filename"],
+        created_at=row["created_at"] or "",
     )
 
 

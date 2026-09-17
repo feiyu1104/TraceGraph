@@ -18,6 +18,7 @@ def traverse_paths(
     graph: GraphRepository,
     start: Entity,
     *,
+    workspace_id: str,
     max_hops: int = DEFAULT_MAX_HOPS,
     limit: int = MAX_PATHS,
     fanout: int = DEFAULT_FANOUT,
@@ -29,7 +30,14 @@ def traverse_paths(
     遍历语义由本函数统一定义，所有图后端只负责实现 `expand_frontier`
     这一个原语，因此「各后端实现相同的逐层遍历」是结构上成立的。
     返回条数上限是 `max_hops × limit`（每个跳数层级各至多 limit 条）。
+
+    `workspace_id` 没有默认值，且必须与 start 的归属一致：遍历是从一个
+    实体往外走，起点属于哪个 Workspace、就往哪个 Workspace 走，两者对不上
+    说明调用方拿错了实体。宁可在这里报错，也不要用一个默认 Workspace 把
+    别的 Workspace 的实体悄悄扩展成空结果。
     """
+    if start.workspace_id != workspace_id:
+        raise ValueError("遍历起点不属于指定的 Workspace")
     if max_hops < 1 or max_hops > MAX_HOPS:
         raise ValueError(f"max_hops 必须在 1 到 {MAX_HOPS} 之间")
     if limit < 1:
@@ -50,6 +58,7 @@ def traverse_paths(
             expansion.node_id: expansion
             for expansion in graph.expand_frontier(
                 tuple(sorted({tail.id for _, _, tail in level})),
+                workspace_id=workspace_id,
                 fanout=fanout,
                 relation_types=relation_types,
                 direction=direction,

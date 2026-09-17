@@ -10,6 +10,7 @@ from tracegraph.core.contracts import (
     CandidateKind,
     CandidateRelation,
     CandidateStatus,
+    CandidateTally,
     Chunk,
     Claim,
     Document,
@@ -28,8 +29,14 @@ from tracegraph.core.contracts import (
     IngestionStatus,
     PathStep,
     PathTruncation,
+    PublicationOutcome,
     Relation,
     TraversalDirection,
+)
+from tracegraph.core.identity import (
+    graph_entity_id,
+    graph_relation_id,
+    normalize_name,
 )
 from tracegraph.core.ports import (
     CandidateRepository,
@@ -51,6 +58,7 @@ __all__ = [
     "CandidateRelation",
     "CandidateRepository",
     "CandidateStatus",
+    "CandidateTally",
     "Chunk",
     "Claim",
     "Document",
@@ -73,7 +81,11 @@ __all__ = [
     "IngestionStatus",
     "PathStep",
     "PathTruncation",
+    "PublicationOutcome",
     "Relation",
     "Retriever",
     "TraversalDirection",
+    "graph_entity_id",
+    "graph_relation_id",
+    "normalize_name",
 ]

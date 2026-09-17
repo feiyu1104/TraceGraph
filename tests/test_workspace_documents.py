@@ -127,6 +127,10 @@ def test_legacy_database_migrates_without_losing_rows(tmp_path) -> None:
     with SQLiteDocumentRepository(database) as repository:
         assert len(repository.list_documents(DEFAULT_WORKSPACE_ID)) == 2
         assert _counts(database) == before
+        # 旧文档的入库时间无从追溯，迁移不许拿「现在」冒充它。
+        migrated = repository.get_document("doc-1")
+        assert migrated.created_at == "" and migrated.updated_at == ""
+        assert repository.get_version("ver-1").created_at == ""
 
     connection = sqlite3.connect(database)
     try:
@@ -151,6 +155,8 @@ def test_migrated_documents_schema_matches_final_shape(tmp_path) -> None:
     try:
         columns = {row[1]: row for row in connection.execute("PRAGMA table_info(documents)")}
         assert columns["workspace_id"][3] == 1  # notnull
+        # 时间列必须活着穿过重建：重建按固定列清单搬数据，漏写一列就丢一列。
+        assert {"created_at", "updated_at"} <= set(columns)
         assert [
             row[2] for row in connection.execute("PRAGMA foreign_key_list(documents)")
         ] == ["workspaces"]
@@ -198,6 +204,24 @@ def test_reimport_in_same_workspace_reuses_document(repository) -> None:
     assert second.document == first.document
     assert second.job.status is IngestionStatus.SKIPPED
     assert repository.list_documents() == (first.document,)
+
+
+def test_ingestion_stamps_document_and_version_times(repository) -> None:
+    service = TextIngestionService(repository)
+
+    first = service.ingest_text("指南.md", "# 高血压\n\n患者应定期监测血压。")
+    stored = repository.get_document(first.document.id)
+
+    assert stored.created_at and stored.updated_at
+    assert first.version.created_at == stored.created_at
+
+    # 换个正文再传一次：同一个文档多了个版本，更新时间跟着走到新版本。
+    second = service.ingest_text("指南.md", "# 高血压\n\n患者应每日监测血压。")
+    after = repository.get_document(first.document.id)
+
+    assert after.created_at == stored.created_at
+    assert after.updated_at == second.version.created_at
+    assert after.updated_at >= stored.updated_at
 
 
 def test_unknown_workspace_cannot_receive_documents(repository) -> None:

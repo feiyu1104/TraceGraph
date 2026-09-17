@@ -18,7 +18,6 @@ from pydantic import BaseModel, Field
 from tracegraph import __version__
 from tracegraph.core.contracts import (
     DEFAULT_MAX_HOPS,
-    DEFAULT_WORKSPACE_ADAPTER_ID,
     DEFAULT_WORKSPACE_ID,
     MAX_HOPS,
     Answer,
@@ -26,6 +25,8 @@ from tracegraph.core.contracts import (
     CandidateEntity,
     CandidateRelation,
     CandidateStatus,
+    CandidateTally,
+    Document,
     EvaluationCase,
     Evidence,
     Entity,
@@ -73,10 +74,15 @@ from tracegraph.ingestion.service import (
     OriginalConflictError,
     TextIngestionService,
 )
-from tracegraph.ingestion.lifecycle import DocumentLifecycleService
+from tracegraph.ingestion.lifecycle import (
+    DocumentLifecycleService,
+    PublishedGraphConflictError,
+)
 from tracegraph.ingestion.text import UnsupportedDocumentError
 from tracegraph.observability import RequestMetrics
+from tracegraph.publication.service import CandidatePublicationService, PublicationError
 from tracegraph.retrieval.keyword import KeywordRetriever
+from tracegraph.review.service import CandidateReviewError, CandidateReviewService
 from tracegraph.storage.candidates import InMemoryCandidateRepository
 from tracegraph.storage.memory import InMemoryDocumentRepository
 
@@ -162,6 +168,49 @@ class PromoteFeedbackRequest(BaseModel):
     expected_status: AnswerStatus
 
 
+class EntityReviewRequest(BaseModel):
+    """单条候选实体的审核或内容修正；两者都不给就是一次纯粹的读取。
+
+    `name` 与 `type` 只能改待审核的候选，`status` 只能走状态机里那四个迁移。
+    """
+
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    status: CandidateStatus | None = None
+    name: str | None = None
+    type: str | None = None
+
+
+class RelationReviewRequest(BaseModel):
+    """单条候选关系的审核或内容修正；两端与 type 只能改待审核的候选。"""
+
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    status: CandidateStatus | None = None
+    source_entity_id: str | None = None
+    target_entity_id: str | None = None
+    type: str | None = None
+
+
+class BatchReviewRequest(BaseModel):
+    """把一批候选改成同一个审核状态；整批要么全改、要么一条都不改。"""
+
+    workspace_id: str = DEFAULT_WORKSPACE_ID
+    status: CandidateStatus
+    entity_ids: list[str] = Field(default_factory=list)
+    relation_ids: list[str] = Field(default_factory=list)
+
+
+class GraphPublicationRequest(BaseModel):
+    """发布一批已批准的候选，或按 extraction_run_id 发布整次抽取。
+
+    两种指法都支持：给了 run_id 就发布那次抽取里全部已批准的候选，
+    否则发布显式列出的候选 ID。
+    """
+
+    candidate_entity_ids: list[str] = Field(default_factory=list)
+    candidate_relation_ids: list[str] = Field(default_factory=list)
+    extraction_run_id: str | None = None
+
+
 class ExtractionRequest(BaseModel):
     """启动一次抽取。
 
@@ -227,6 +276,18 @@ def create_app(
     # 候选才轮得到 Chunk。
     lifecycle_service = DocumentLifecycleService(
         document_repository, graph_repository, original_store, active_candidates
+    )
+    # 审核服务拿不到图仓储：审核通过本身不会写图，发布是另一次显式调用。
+    review_service = CandidateReviewService(
+        document_repository, active_candidates, known_adapters
+    )
+    # 发布服务是候选表与图后端之间唯一的通路；没有图后端时整条路径不可用。
+    publication_service = (
+        CandidatePublicationService(
+            document_repository, active_candidates, graph_repository
+        )
+        if graph_repository is not None
+        else None
     )
     request_metrics = RequestMetrics()
     application = FastAPI(
@@ -482,6 +543,10 @@ def create_app(
             deleted_chunk_ids = lifecycle_service.delete(document_id)
         except KeyError as error:
             raise ApiError(404, "not_found", "文档不存在") from error
+        except PublishedGraphConflictError as error:
+            # 已经发布到图谱的文档不静默删除：图里的节点与边可能还被别的文档
+            # 引用着，删掉证据会把它们变成半截知识。撤销发布是未来的功能。
+            raise ApiError(409, error.error_code, str(error)) from error
         return {
             "document_id": document_id,
             "deleted_chunk_ids": list(deleted_chunk_ids),
@@ -493,7 +558,7 @@ def create_app(
         workspace = _require_workspace(document_repository, request.workspace_id)
         adapter = _require_adapter(known_adapters, workspace)
         retriever, _ = _retrieval_route(
-            workspace, active_retriever, document_repository, graph_repository
+            active_retriever, document_repository, graph_repository
         )
         try:
             evidences = retriever.retrieve(
@@ -512,38 +577,48 @@ def create_app(
 
     @application.get("/graph/entities")
     def search_graph_entities(
+        workspace_id: str,
         query: str,
         limit: int = QueryParam(default=10, ge=1, le=50),
     ) -> dict[str, object]:
-        if graph_repository is None:
-            raise ApiError(503, "graph_unavailable", "图存储未启用")
+        """在指定 Workspace 的图里按名称找实体。
+
+        `workspace_id` 是必填的查询参数：缺失时 FastAPI 直接返回 422，不存在
+        时返回 404 —— 两种情况都不会退回默认 Workspace 的数据。
+        """
+        _require_workspace(document_repository, workspace_id)
+        graph = _require_graph(graph_repository)
         try:
-            entities = graph_repository.search_entities(query, limit)
+            entities = graph.search_entities(query, workspace_id, limit)
         except ValueError as error:
             raise ApiError(400, "invalid_request", str(error)) from error
         return {
             "query": query,
+            "workspace_id": workspace_id,
             "entities": [_entity_response(entity) for entity in entities],
         }
 
     @application.get("/graph/entities/{entity_id}/relations")
     def graph_entity_relations(
         entity_id: str,
+        workspace_id: str,
         limit: int = QueryParam(default=30, ge=1, le=100),
     ) -> dict[str, object]:
-        if graph_repository is None:
-            raise ApiError(503, "graph_unavailable", "图存储未启用")
-        entity = graph_repository.get_entity(entity_id)
+        _require_workspace(document_repository, workspace_id)
+        graph = _require_graph(graph_repository)
+        entity = graph.get_entity(entity_id, workspace_id)
         if entity is None:
             raise ApiError(404, "not_found", "图实体不存在")
-        relations = graph_repository.list_relations((entity_id,), limit)
+        relations = graph.list_relations((entity_id,), workspace_id, limit)
         return {
+            "workspace_id": workspace_id,
             "entity": _entity_response(entity),
             "relations": [
                 _relation_response(
                     relation,
                     entity_id,
-                    graph_repository,
+                    workspace_id,
+                    graph,
                     document_repository,
                 )
                 for relation in relations
@@ -551,23 +626,30 @@ def create_app(
         }
 
     @application.get("/graph/relations/{relation_id}/evidence")
-    def graph_relation_evidence(relation_id: str) -> dict[str, object]:
-        """按需返回某条关系溯源到的原文片段，供界面点击路径中的关系时懒加载。"""
-        if graph_repository is None:
-            raise ApiError(503, "graph_unavailable", "图存储未启用")
-        relation = graph_repository.get_relation(relation_id)
+    def graph_relation_evidence(
+        relation_id: str, workspace_id: str
+    ) -> dict[str, object]:
+        """按需返回某条关系溯源到的原文片段，供界面点击路径中的关系时懒加载。
+
+        原文取自 SQLite 的 chunks：图里只存了 Chunk ID，正文从来没有第二份
+        副本。
+        """
+        _require_workspace(document_repository, workspace_id)
+        graph = _require_graph(graph_repository)
+        relation = graph.get_relation(relation_id, workspace_id)
         if relation is None:
             raise ApiError(404, "not_found", "图关系不存在")
-        source = graph_repository.get_entity(relation.source_entity_id)
-        target = graph_repository.get_entity(relation.target_entity_id)
+        source = graph.get_entity(relation.source_entity_id, workspace_id)
+        target = graph.get_entity(relation.target_entity_id, workspace_id)
         return {
+            "workspace_id": workspace_id,
             "relation": {
                 "id": relation.id,
                 "type": relation.type,
                 "source": _entity_response(source) if source else None,
                 "target": _entity_response(target) if target else None,
             },
-            "evidence": _chunk_evidence(document_repository, relation),
+            "evidence": _chunk_evidence(document_repository, relation, workspace_id),
         }
 
     @application.post("/query")
@@ -576,7 +658,7 @@ def create_app(
         workspace = _require_workspace(document_repository, request.workspace_id)
         adapter = _require_adapter(known_adapters, workspace)
         retriever, request_graph = _retrieval_route(
-            workspace, active_retriever, document_repository, graph_repository
+            active_retriever, document_repository, graph_repository
         )
         # 装配时那个 AnswerService 从头到尾不改：本次请求的适配器与检索器装在
         # 一个只活在这次调用里的实例上，并发请求之间没有可互相覆盖的状态。
@@ -681,6 +763,123 @@ def create_app(
             ],
         }
 
+    @application.patch("/candidate-entities/{candidate_id}")
+    def review_candidate_entity(
+        candidate_id: str, request: EntityReviewRequest
+    ) -> dict[str, object]:
+        """审核或修正一条候选实体；两者都不给就是一次纯粹的读取。
+
+        审核状态与发布状态是两回事：这里的 status 只在 pending / approved /
+        rejected 之间走，已发布的候选既不能改内容也不能退回。
+        """
+        try:
+            entity = review_service.review_entity(
+                request.workspace_id,
+                candidate_id,
+                status=request.status,
+                name=request.name,
+                entity_type=request.type,
+            )
+        except CandidateReviewError as error:
+            raise ApiError(error.status_code, error.error_code, str(error)) from error
+        return _candidate_entity_response(entity, document_repository)
+
+    @application.patch("/candidate-relations/{candidate_id}")
+    def review_candidate_relation(
+        candidate_id: str, request: RelationReviewRequest
+    ) -> dict[str, object]:
+        try:
+            relation = review_service.review_relation(
+                request.workspace_id,
+                candidate_id,
+                status=request.status,
+                source_entity_id=request.source_entity_id,
+                target_entity_id=request.target_entity_id,
+                relation_type=request.type,
+            )
+        except CandidateReviewError as error:
+            raise ApiError(error.status_code, error.error_code, str(error)) from error
+        return _candidate_relation_response(relation, document_repository)
+
+    @application.post("/candidates/batch-review")
+    def batch_review_candidates(request: BatchReviewRequest) -> dict[str, object]:
+        """批量审核：任一候选不存在、跨 Workspace 或状态非法时整批回滚。"""
+        try:
+            entities, relations = review_service.review_batch(
+                request.workspace_id,
+                entity_ids=tuple(request.entity_ids),
+                relation_ids=tuple(request.relation_ids),
+                status=request.status,
+            )
+        except CandidateReviewError as error:
+            raise ApiError(error.status_code, error.error_code, str(error)) from error
+        return {
+            "workspace_id": request.workspace_id,
+            "status": request.status.value,
+            "entities": [
+                _candidate_entity_response(entity, document_repository)
+                for entity in entities
+            ],
+            "relations": [
+                _candidate_relation_response(relation, document_repository)
+                for relation in relations
+            ],
+        }
+
+    @application.post("/workspaces/{workspace_id}/graph-publications")
+    def publish_graph(
+        workspace_id: str, request: GraphPublicationRequest
+    ) -> dict[str, object]:
+        """把已批准的候选发布到当前 Workspace 的图后端。
+
+        图后端的类型由服务端配置决定：Neo4j 就写 Neo4j，SQLite 就写 SQLite
+        图仓储 —— 两种后端在这里是同一条代码路径，语义因此不会分叉。
+        """
+        if publication_service is None:
+            raise ApiError(503, "graph_unavailable", "图存储未启用，无法发布。")
+        try:
+            outcome = (
+                publication_service.publish_run(workspace_id, request.extraction_run_id)
+                if request.extraction_run_id is not None
+                else publication_service.publish(
+                    workspace_id,
+                    entity_ids=tuple(request.candidate_entity_ids),
+                    relation_ids=tuple(request.candidate_relation_ids),
+                )
+            )
+        except PublicationError as error:
+            raise ApiError(error.status_code, error.error_code, str(error)) from error
+        return {
+            "workspace_id": workspace_id,
+            "backend": getattr(graph_repository, "name", "unknown"),
+            "counts": outcome.to_counts(),
+            "created_entity_ids": list(outcome.created_entity_ids),
+            "reused_entity_ids": list(outcome.reused_entity_ids),
+            "skipped_entity_ids": list(outcome.skipped_entity_ids),
+            "created_relation_ids": list(outcome.created_relation_ids),
+            "reused_relation_ids": list(outcome.reused_relation_ids),
+            "skipped_relation_ids": list(outcome.skipped_relation_ids),
+        }
+
+    @application.get("/workspaces/{workspace_id}/documents")
+    def list_workspace_documents(workspace_id: str) -> dict[str, object]:
+        """该 Workspace 的文档清单，含最新版本、Chunk 数与候选计数。
+
+        只列出这个 Workspace 的文档；候选计数一次取全，避免前端按文档逐个查。
+        """
+        workspace = _require_workspace(document_repository, workspace_id)
+        documents = document_repository.list_documents(workspace.id)
+        document_ids = tuple(document.id for document in documents)
+        tallies = active_candidates.tally_documents(workspace.id, document_ids)
+        with_runs = active_candidates.documents_with_runs(workspace.id, document_ids)
+        return {
+            "workspace_id": workspace.id,
+            "documents": [
+                _document_summary(document, document_repository, tallies, with_runs)
+                for document in documents
+            ],
+        }
+
     @application.post("/feedback")
     def submit_feedback(request: FeedbackRequest) -> dict[str, object]:
         try:
@@ -738,6 +937,47 @@ def load_max_upload_bytes(environ: Mapping[str, str] | None = None) -> int:
     return int(megabytes * 1024 * 1024)
 
 
+def _require_graph(graph: GraphRepository | None) -> GraphRepository:
+    if graph is None:
+        raise ApiError(503, "graph_unavailable", "图存储未启用")
+    return graph
+
+
+def _document_summary(
+    document: Document,
+    document_repository: DocumentRepository,
+    tallies: dict[str, CandidateTally],
+    documents_with_runs: frozenset[str],
+) -> dict[str, object]:
+    """文档列表的一行：元信息 + 最新版本 + Chunk 数 + 候选计数。"""
+    versions = document_repository.list_versions(document.id)
+    latest = max(versions, key=lambda version: version.number) if versions else None
+    tally = tallies.get(document.id, CandidateTally())
+    return {
+        "id": document.id,
+        "source_name": document.source_name,
+        "media_type": document.media_type,
+        # 时间对既有 DUTMed 文档是空的（迁移时无从追溯），空串统一报成 null。
+        "created_at": document.created_at or None,
+        "updated_at": document.updated_at or None,
+        "latest_version_id": latest.id if latest else None,
+        "latest_version_created_at": (latest.created_at or None) if latest else None,
+        "chunk_count": (
+            len(document_repository.list_chunks(latest.id)) if latest else 0
+        ),
+        # 有过抽取任务就算「存在」，哪怕它失败了或者一条候选都没产出 ——
+        # 只报成功过的任务会让「抽过但没抽出东西」看起来像从没抽过。
+        "has_extraction_runs": document.id in documents_with_runs,
+        "candidates": {
+            "pending": tally.pending,
+            "approved": tally.approved,
+            "rejected": tally.rejected,
+            "published": tally.published,
+            "total": tally.total,
+        },
+    }
+
+
 def _require_workspace(
     repository: DocumentRepository, workspace_id: str
 ) -> Workspace:
@@ -760,24 +1000,23 @@ def _require_adapter(registry: AdapterRegistry, workspace: Workspace) -> DomainA
 
 
 def _retrieval_route(
-    workspace: Workspace,
     retriever: Retriever,
     repository: DocumentRepository,
     graph: GraphRepository | None,
 ) -> tuple[Retriever, GraphRepository | None]:
     """本次请求走哪条检索链路。
 
-    图索引本批仍没有 Workspace 维度，因此只有 ws-default 的医疗 Workspace
-    继续用装配时那条混合检索；其他 Workspace 一律只走本 Workspace 的关键词
-    检索 —— 既不调用图仓储，也不可能带出医疗图谱里的证据。图仓储一并置空，
-    非医疗 Workspace 的冲突判定也就不会去问那张全局医疗图。
+    图索引已经按 Workspace 隔离，任何 Workspace 都可以走装配时那条混合检索：
+    图仓储的每次查询都由调用方显式带上本次请求的 workspace_id，别的 Workspace
+    的节点、关系与证据进不了结果集，因此不再需要按 Workspace 或适配器把图
+    检索整个关掉。
+
+    图后端不可用时退回本 Workspace 的关键词检索：还没有图数据的 Workspace
+    照样能问答，而不是报错。
     """
-    if (
-        workspace.id == DEFAULT_WORKSPACE_ID
-        and workspace.adapter_id == DEFAULT_WORKSPACE_ADAPTER_ID
-    ):
-        return retriever, graph
-    return KeywordRetriever(repository), None
+    if graph is None:
+        return KeywordRetriever(repository), None
+    return retriever, graph
 
 
 def _source_name(filename: str, field: str) -> str:
@@ -868,20 +1107,28 @@ def _require_valid_max_hops(max_hops: int) -> None:
 
 
 def _chunk_evidence(
-    document_repository: DocumentRepository, relation: Relation
+    document_repository: DocumentRepository,
+    relation: Relation,
+    workspace_id: str,
 ) -> list[dict[str, object]]:
-    """把关系的证据 chunk ID 解析成可阅读的 DUTMed 原文片段。"""
+    """把关系的证据 chunk ID 解析成可阅读的原文片段。
+
+    图侧已经按 Workspace 过滤过一次，这里再按证据所属文档复检一次：图和文档
+    是两套存储，一条归属正确的关系仍可能引用到别的 Workspace 的 Chunk。
+    """
     resolved = []
     for chunk_id in relation.evidence_chunk_ids:
         chunk = document_repository.get_chunk(chunk_id)
         if chunk is None:
             continue
         document = document_repository.get_document(chunk.document_id)
+        if document is None or document.workspace_id != workspace_id:
+            continue
         resolved.append(
             {
                 "chunk_id": chunk.id,
                 "content": chunk.content,
-                "source_name": document.source_name if document else "",
+                "source_name": document.source_name,
                 "locator": chunk.locator,
             }
         )
@@ -1046,21 +1293,24 @@ def _workspace_response(workspace: Workspace) -> dict[str, str]:
 def _relation_response(
     relation: Relation,
     center_entity_id: str,
+    workspace_id: str,
     graph_repository: GraphRepository,
     document_repository: DocumentRepository,
 ) -> dict[str, object]:
-    source = graph_repository.get_entity(relation.source_entity_id)
-    target = graph_repository.get_entity(relation.target_entity_id)
+    source = graph_repository.get_entity(relation.source_entity_id, workspace_id)
+    target = graph_repository.get_entity(relation.target_entity_id, workspace_id)
     evidence = []
     for chunk_id in relation.evidence_chunk_ids:
         chunk = document_repository.get_chunk(chunk_id)
         if chunk is None:
             continue
         document = document_repository.get_document(chunk.document_id)
+        if document is None or document.workspace_id != workspace_id:
+            continue
         evidence.append(
             {
                 "chunk_id": chunk.id,
-                "source_name": document.source_name if document else "",
+                "source_name": document.source_name,
                 "locator": chunk.locator,
             }
         )
