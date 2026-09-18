@@ -19,7 +19,7 @@ interface WorkspaceBarProps {
    * 这个值与 App 控制图谱浏览、多跳开关用的是同一个判定。
    */
   supportsGraph: boolean
-  /** 查询或上传进行中：此时不允许切换知识库，也不允许建库。 */
+  /** 查询或写入进行中：此时不允许切换知识库或功能页，也不允许建库。 */
   disabled: boolean
   /** 建库成功后回调；返回是否真的切换过去了（进行中的请求会阻止切换）。 */
   onCreated: (workspace: WorkspaceInfo) => boolean
@@ -136,7 +136,9 @@ export default function WorkspaceBar({
       </div>
 
       {disabled && (
-        <p className="workspace-bar__notice">查询或上传进行中，暂时不能切换知识库或新建。</p>
+        <p className="workspace-bar__notice">
+          查询或写入进行中，暂时不能切换知识库、切换功能页或新建。
+        </p>
       )}
 
       {listNotice && (

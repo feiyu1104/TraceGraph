@@ -28,9 +28,16 @@
   transition: border-color 120ms ease, background-color 120ms ease;
 }
 
-.tabs__tab:hover {
+.tabs__tab:hover:not(:disabled) {
   border-color: var(--line-strong);
   background: var(--surface-quiet);
+}
+
+/* 写操作进行中不允许切页：变暗并保留当前页的高亮，让「现在走不了」一眼可见。
+   WorkspaceBar 同时会给出原因说明。 */
+.tabs__tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .tabs__tab--active {

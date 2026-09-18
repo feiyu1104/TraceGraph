@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import type { ApiRequestError, PublicationTarget } from '../api/client'
 import type {
@@ -55,7 +55,12 @@ interface CandidateBoardProps {
     candidateId: string,
     status: CandidateStatus,
   ) => void
-  onSave: (kind: 'entity' | 'relation', candidateId: string, edit: CandidateEdit) => void
+  /** 返回这次保存是否成功；只有 true 才允许收起编辑表单。 */
+  onSave: (
+    kind: 'entity' | 'relation',
+    candidateId: string,
+    edit: CandidateEdit,
+  ) => Promise<boolean>
   onBatchReview: (
     status: CandidateStatus,
     entityIds: string[],
@@ -127,16 +132,27 @@ export default function CandidateBoard(props: CandidateBoardProps) {
 
   const totals = useMemo(() => count(entities, relations), [entities, relations])
 
+  // 已发布的候选不参与任何审核操作，因此两种候选都在这里剔除：显示出来的
+  // 「已选」数量必须等于真正能被批量操作处理的那一批。
   const selected = useMemo(
     () => ({
-      entities: entities.filter((entity) => selectedEntityIds.has(entity.id)),
-      // 已发布的候选不参与任何审核操作，即使它还在选中集合里。
+      entities: entities.filter(
+        (entity) => selectedEntityIds.has(entity.id) && !entity.is_published,
+      ),
       relations: relations.filter(
         (relation) => selectedRelationIds.has(relation.id) && !relation.is_published,
       ),
     }),
     [entities, relations, selectedEntityIds, selectedRelationIds],
   )
+
+  // 候选清单刷新、审核状态变化、发布成功之后，选中集合里会留下已经不存在
+  // （换了文档 / 换了抽取任务）或已经发布的 ID。把它们清掉，勾选数量才和
+  // 实际能执行的批量操作对得上。
+  useEffect(() => {
+    setSelectedEntityIds((current) => pruneSelection(current, entities))
+    setSelectedRelationIds((current) => pruneSelection(current, relations))
+  }, [entities, relations])
 
   const batchCounts = useMemo(
     () => ({
@@ -465,6 +481,25 @@ function count(entities: CandidateEntity[], relations: CandidateRelation[]) {
     rejected: all.filter((item) => item.status === 'rejected').length,
     published: all.filter((item) => item.is_published).length,
   }
+}
+
+/**
+ * 只保留仍然存在、且尚未发布的候选 ID。
+ * 没有任何变化时返回原集合，避免多一次渲染。
+ */
+function pruneSelection(
+  current: ReadonlySet<string>,
+  candidates: readonly { id: string; is_published: boolean }[],
+): ReadonlySet<string> {
+  if (current.size === 0) return current
+  const selectable = new Set(
+    candidates.filter((item) => !item.is_published).map((item) => item.id),
+  )
+  const next = new Set<string>()
+  for (const candidateId of current) {
+    if (selectable.has(candidateId)) next.add(candidateId)
+  }
+  return next.size === current.size ? current : next
 }
 
 /** 一条候选是否可以参与目标状态为 `status` 的批量操作。 */

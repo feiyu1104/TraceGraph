@@ -269,7 +269,8 @@ export default function App() {
         onCreated={handleCreated}
       />
 
-      <TabBar active={tab} onChange={setTab} />
+      {/* 与知识库选择器同一把锁：写入期间切页会卸载工作台，等于把请求丢在半路。 */}
+      <TabBar active={tab} onChange={setTab} disabled={busy || workbenchBusy} />
 
       <main className={`app__grid${tab === 'qa' ? '' : ' app__grid--single'}`}>
         {tab === 'qa' && (
@@ -333,6 +334,7 @@ export default function App() {
             entityTypes={currentAdapter?.entity_types ?? []}
             relationTypes={currentAdapter?.relation_types ?? []}
             models={models}
+            defaultModelId={defaultModelId}
             maxUploadBytes={
               typeof system?.max_upload_bytes === 'number' ? system.max_upload_bytes : null
             }

@@ -44,7 +44,12 @@ interface CommonProps {
     candidateId: string,
     status: CandidateStatus,
   ) => void
-  onSave: (kind: 'entity' | 'relation', candidateId: string, edit: CandidateEdit) => void
+  /** 返回这次保存是否成功；失败时表单保持打开，输入与服务端错误都留在原地。 */
+  onSave: (
+    kind: 'entity' | 'relation',
+    candidateId: string,
+    edit: CandidateEdit,
+  ) => Promise<boolean>
   /** 这条候选上的请求是否在飞。 */
   busy: boolean
   /** 这条候选专属的服务端错误；冲突信息直接贴在它旁边。 */
@@ -88,17 +93,23 @@ export default function CandidateRow(props: CandidateRowProps) {
     setEditing(true)
   }
 
-  function submitEdit() {
+  // 保存成功（服务端确实接受了这次修改）才收起表单。失败时保持打开：
+  // 草稿还在，服务端错误贴在下面，用户可以直接改完再提交。
+  async function submitEdit() {
     // 只做基础非空检查，合法性以后端为准（类型白名单、自环、跨文档端点）。
     if (props.kind === 'entity') {
       if (!draftName.trim() || !draftType) {
         setLocalError('名称与类型都不能为空。')
         return
       }
-      props.onSave('entity', props.entity.id, {
-        name: draftName.trim(),
-        type: draftType,
-      })
+      if (
+        await props.onSave('entity', props.entity.id, {
+          name: draftName.trim(),
+          type: draftType,
+        })
+      ) {
+        setEditing(false)
+      }
       return
     }
     if (!draftSource || !draftTarget || !draftType) {
@@ -109,11 +120,15 @@ export default function CandidateRow(props: CandidateRowProps) {
       setLocalError('关系两端不能是同一条候选实体。')
       return
     }
-    props.onSave('relation', props.relation.id, {
-      source_entity_id: draftSource,
-      target_entity_id: draftTarget,
-      type: draftType,
-    })
+    if (
+      await props.onSave('relation', props.relation.id, {
+        source_entity_id: draftSource,
+        target_entity_id: draftTarget,
+        type: draftType,
+      })
+    ) {
+      setEditing(false)
+    }
   }
 
   const runLabel = props.run
@@ -230,7 +245,7 @@ export default function CandidateRow(props: CandidateRowProps) {
           className="candidate__edit"
           onSubmit={(event) => {
             event.preventDefault()
-            submitEdit()
+            void submitEdit()
           }}
         >
           {props.kind === 'entity' ? (

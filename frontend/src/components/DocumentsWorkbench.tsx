@@ -52,6 +52,8 @@ interface DocumentsWorkbenchProps {
   entityTypes: string[]
   relationTypes: string[]
   models: ModelInfo[]
+  /** 服务端 `/models` 给出的默认模型：抽取模型的首次默认值就是它。 */
+  defaultModelId: string
   maxUploadBytes: number | null
   graphAvailable: boolean
   /** 发布成功后通知页面重新挂载图谱浏览。 */
@@ -61,7 +63,7 @@ interface DocumentsWorkbenchProps {
 }
 
 export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
-  const { workspaceId, models, onBusyChange, onGraphChanged } = props
+  const { workspaceId, models, defaultModelId, onBusyChange, onGraphChanged } = props
 
   const [uploadBusy, setUploadBusy] = useState(false)
 
@@ -201,12 +203,21 @@ export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
     void loadCandidates(selectedDocumentId, runFilter)
   }, [loadCandidates, runFilter, selectedDocumentId])
 
-  // 模型清单是异步来的；选中的模型不在清单里时（首次进入、清单刷新）
-  // 退回第一个可用模型。
+  // 用户是否自己动过抽取模型。清单是异步来的，而挂载那一刻它往往还是
+  // App 的初始值；只有「没选过」时才跟随服务端默认，选过就不许被清单刷新改掉。
+  const pickedModelRef = useRef(false)
+
+  // 首选取服务端默认模型，它不在清单里或不可用时退回第一个可用模型。
+  // 用户已经选定的模型只要仍然可用就原样保留。
   useEffect(() => {
-    if (modelId && models.some((model) => model.id === modelId && model.available)) return
-    setModelId(models.find((model) => model.available)?.id ?? '')
-  }, [modelId, models])
+    if (pickedModelRef.current && models.some((model) => model.id === modelId && model.available)) {
+      return
+    }
+    const fallback =
+      models.find((model) => model.id === defaultModelId && model.available) ??
+      models.find((model) => model.available)
+    setModelId(fallback?.id ?? '')
+  }, [defaultModelId, modelId, models])
 
   const busy =
     uploadBusy || extractionBusy || batchBusy || publishBusy || busyIds.size > 0
@@ -313,8 +324,14 @@ export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
     [loadDocuments, markBusy, refreshCandidates, workspaceId],
   )
 
+  // 返回这次保存是否真的成功：编辑表单只有拿到 true 才收起，不许在请求
+  // 发出时就当作已保存。
   const saveCandidate = useCallback(
-    async (kind: 'entity' | 'relation', candidateId: string, edit: CandidateEdit) => {
+    async (
+      kind: 'entity' | 'relation',
+      candidateId: string,
+      edit: CandidateEdit,
+    ): Promise<boolean> => {
       markBusy(candidateId, true)
       setRowErrors((current) => omit(current, candidateId))
       try {
@@ -324,8 +341,10 @@ export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
           await reviewCandidateRelation(candidateId, workspaceId, edit)
         }
         await refreshCandidates()
+        return true
       } catch (error) {
         setRowErrors((current) => ({ ...current, [candidateId]: toApiError(error) }))
+        return false
       } finally {
         markBusy(candidateId, false)
       }
@@ -408,7 +427,10 @@ export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
               adapterId={props.adapterId}
               models={models}
               modelId={modelId}
-              onModelChange={setModelId}
+              onModelChange={(nextModelId) => {
+                pickedModelRef.current = true
+                setModelId(nextModelId)
+              }}
               onStart={() => void startExtractionRun()}
               busy={extractionBusy}
               activeRun={activeRun}
@@ -453,7 +475,7 @@ export default function DocumentsWorkbench(props: DocumentsWorkbenchProps) {
             onReviewStatus={(kind, candidateId, status) =>
               void reviewStatus(kind, candidateId, status)
             }
-            onSave={(kind, candidateId, edit) => void saveCandidate(kind, candidateId, edit)}
+            onSave={(kind, candidateId, edit) => saveCandidate(kind, candidateId, edit)}
             onBatchReview={(status, entityIds, relationIds) =>
               void batchReview(status, entityIds, relationIds)
             }
