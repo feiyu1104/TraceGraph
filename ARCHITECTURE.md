@@ -46,7 +46,7 @@ TraceGraph 以证据生命周期为主线，而不是以模型调用为中心：
 
 默认应用入口是 `tracegraph.bootstrap:app`。代码在没有环境变量时回退到 SQLite：文档、图谱和反馈共用 `data/local/tracegraph.db`，但由各自仓库管理独立数据表。该组合不需要外部服务。
 
-当前本机部署已将 `TRACEGRAPH_GRAPH_BACKEND` 设为 `neo4j`。实体关系写入 `D:\Neo4j` 中的 Neo4j，文档元数据和原文仍留在 SQLite。图关系只保存 Evidence Chunk ID，避免在两个数据库中复制整段原文。导入器按疾病批量提交节点和关系，保证同一疾病的旧出向关系被原子替换。
+可选部署可以把 `TRACEGRAPH_GRAPH_BACKEND` 设为 `neo4j`。此时实体关系写入用户配置的 Neo4j，文档元数据和原文仍留在 SQLite。图关系只保存 Evidence Chunk ID，避免在两个数据库中复制整段原文。导入器按疾病批量提交节点和关系，保证同一疾病的旧出向关系被原子替换。
 
 图后端由 `graph_backend.create_graph_repository` 统一选择，`start.ps1 -Mode neo4j|sqlite` 是它在启动脚本上的入口。**默认不降级**：Neo4j 连不上就直接失败，因为换后端可能换掉查询结果。只有显式设置 `TRACEGRAPH_GRAPH_FALLBACK=sqlite` 才降级，且降级事实会写入启动日志与 `/system`（`graph_requested` / `graph_degraded` / `graph_detail`），不会静默发生。
 

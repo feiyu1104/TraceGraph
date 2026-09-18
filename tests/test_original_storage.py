@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import sqlite3
+import threading
 
 import anyio
 import httpx2
@@ -63,6 +64,53 @@ def _files_under(directory: Path) -> list[str]:
         for path in directory.rglob("*")
         if path.is_file()
     )
+
+
+class _PausingOriginalStore(FileSystemOriginalStore):
+    """第一份原件写完后暂停，让第二个上传请求确定地撞上事务窗口。"""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.calls = 0
+        self.first_saved = threading.Event()
+        self.second_save_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def save(self, **kwargs: object) -> str:
+        self.calls += 1
+        call_number = self.calls
+        if call_number > 1:
+            self.second_save_started.set()
+        stored_path = super().save(**kwargs)
+        if call_number == 1:
+            self.first_saved.set()
+            assert self.release_first.wait(timeout=10)
+        return stored_path
+
+
+class _IngestionWorker:
+    def __init__(self, action) -> None:
+        self.action = action
+        self.started = threading.Event()
+        self.result = None
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._run)
+
+    def _run(self) -> None:
+        self.started.set()
+        try:
+            self.result = self.action()
+        except BaseException as error:  # 测试必须留住线程里的任何失败
+            self.error = error
+
+    def start(self) -> "_IngestionWorker":
+        self.thread.start()
+        return self
+
+    def join(self) -> "_IngestionWorker":
+        self.thread.join(timeout=10)
+        assert not self.thread.is_alive(), "并发入库没有结束（疑似死锁）"
+        return self
 
 
 async def _post(application, path: str, payload: dict[str, object]) -> httpx2.Response:
@@ -439,6 +487,66 @@ def test_same_text_with_different_bytes_never_replaces_the_stored_original(
     assert repository.list_versions(first.document.id) == (first.version,)
     assert store.read(first.version.stored_path) == _GUIDELINE.encode("utf-8")
     assert _files_under(store.root) == [first.version.stored_path]
+
+
+def test_concurrent_first_uploads_keep_the_committed_original(tmp_path) -> None:
+    """同一新版本的两个上传不能让失败清理删掉成功请求的原件。"""
+    repository = InMemoryDocumentRepository()
+    store = _PausingOriginalStore(tmp_path / "originals")
+    service = TextIngestionService(repository, original_store=store)
+    raw = _GUIDELINE.encode("utf-8")
+
+    first = _IngestionWorker(lambda: service.ingest_bytes("指南.md", raw)).start()
+    assert store.first_saved.wait(timeout=10)
+    second = _IngestionWorker(lambda: service.ingest_bytes("指南.md", raw)).start()
+    assert second.started.wait(timeout=10)
+
+    # 第一条事务尚未完成时，第二条不能进入原件写入阶段。
+    assert not store.second_save_started.wait(timeout=0.1)
+    store.release_first.set()
+    first.join()
+    second.join()
+
+    assert first.error is None and second.error is None
+    assert first.result is not None and second.result is not None
+    assert {first.result.job.status, second.result.job.status} == {
+        IngestionStatus.SUCCEEDED,
+        IngestionStatus.SKIPPED,
+    }
+    assert store.calls == 1
+    committed = repository.list_versions(first.result.document.id)
+    assert len(committed) == 1
+    assert committed[0].stored_path is not None
+    assert store.read(committed[0].stored_path) == raw
+
+
+def test_concurrent_backfills_keep_the_attached_original(tmp_path) -> None:
+    """历史版本补存原件时，两个请求也只能有一个真正写文件和认领记录。"""
+    repository = InMemoryDocumentRepository()
+    raw = _GUIDELINE.encode("utf-8")
+    text_only = TextIngestionService(repository).ingest_bytes("指南.md", raw)
+    assert text_only.version.stored_path is None
+
+    store = _PausingOriginalStore(tmp_path / "originals")
+    service = TextIngestionService(repository, original_store=store)
+    first = _IngestionWorker(lambda: service.ingest_bytes("指南.md", raw)).start()
+    assert store.first_saved.wait(timeout=10)
+    second = _IngestionWorker(lambda: service.ingest_bytes("指南.md", raw)).start()
+    assert second.started.wait(timeout=10)
+
+    assert not store.second_save_started.wait(timeout=0.1)
+    store.release_first.set()
+    first.join()
+    second.join()
+
+    assert first.error is None and second.error is None
+    assert first.result is not None and second.result is not None
+    assert first.result.job.status is IngestionStatus.SKIPPED
+    assert second.result.job.status is IngestionStatus.SKIPPED
+    assert store.calls == 1
+    committed = repository.get_version(text_only.version.id)
+    assert committed is not None and committed.stored_path is not None
+    assert store.read(committed.stored_path) == raw
 
 
 def test_failed_backfill_leaves_no_original_behind(

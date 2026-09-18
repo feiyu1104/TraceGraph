@@ -1,9 +1,10 @@
-export type TabKey = 'qa' | 'knowledge' | 'graph'
+export type TabKey = 'qa' | 'knowledge' | 'graph' | 'models'
 
 const TABS: { key: TabKey; label: string; hint: string }[] = [
   { key: 'qa', label: '知识问答', hint: '按证据回答当前知识库里的问题' },
   { key: 'knowledge', label: '文档与知识', hint: '上传、抽取、审核并发布到图谱' },
   { key: 'graph', label: '图谱浏览', hint: '查看已经发布到图谱的实体与关系' },
+  { key: 'models', label: '模型设置', hint: '连接服务、选择模型并设置默认项' },
 ]
 
 interface TabBarProps {

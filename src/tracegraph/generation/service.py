@@ -18,10 +18,8 @@ from tracegraph.generation.providers import (
 
 
 # 回答正文只由已通过校验的直接事实主张拼装。推导关联有独立字段
-# （`Answer.derived_associations`），绝不再拼进正文 —— 否则同一批推导
+# （`Answer.derived_associations`），绝不再拼进正文，否则同一批推导
 # 会同时出现在正文和推导区块里，被读成两批不同的结论。
-_ANSWER_HEADER = "根据当前知识库中的原文事实："
-_ANSWER_FOOTER = "以上内容仅来自知识库原文摘录，用于知识检索与学习，不替代专业判断。"
 
 # 同源直接冲突的判定规则：同一主体对同一客体同时给出这两种关系。
 _OPPOSING_RELATION_TYPES = ("SHOULD_EAT", "SHOULD_NOT_EAT")
@@ -162,8 +160,9 @@ class AnswerService:
             )
         return Answer(
             status=AnswerStatus.ANSWERED,
-            # 正文只由已通过校验的主张拼装，生成器的自由文本不进这里。
-            text=compose_text(generated.claims),
+            # 模型按阅读顺序生成带证据的分句，服务端校验证据后再合成完整段落。
+            # 模型没有绕过引用约束写任意正文的通道。
+            text=compose_text(generated.claims, evidences),
             claims=generated.claims,
             derived_associations=associations,
             evidences=evidences,
@@ -278,18 +277,31 @@ def _build_derived_associations(evidences: tuple[Evidence, ...]) -> tuple[Claim,
     return tuple(associations)
 
 
-def compose_text(claims: tuple[Claim, ...]) -> str:
-    """由已通过校验的直接事实主张拼装回答正文。
+def compose_text(
+    claims: tuple[Claim, ...], evidences: tuple[Evidence, ...] = ()
+) -> str:
+    """由已通过校验的直接事实主张拼装一段带引用的完整回答。
 
     这是 `answer.text` 的唯一来源：生成器（离线摘录或大模型）都只提交主张，
     正文一律在这里确定性组装，因此正文里不可能出现任何未被主张承载的结论。
     """
-    lines = [_ANSWER_HEADER]
-    lines.extend(
-        f"- {claim.text} [{index}]" for index, claim in enumerate(claims, start=1)
-    )
-    lines.append(_ANSWER_FOOTER)
-    return "\n".join(lines)
+    evidence_index = {
+        evidence.id: index for index, evidence in enumerate(evidences, start=1)
+    }
+    sentences = []
+    for claim_index, claim in enumerate(claims, start=1):
+        text = claim.text.strip().rstrip("。！？.!?")
+        cited = []
+        for evidence_id in claim.evidence_ids:
+            index = evidence_index.get(evidence_id)
+            if index is not None and index not in cited:
+                cited.append(index)
+        # 兼容不传 evidences 的内部调用；正式回答始终按 Evidence 的真实顺序编号。
+        if not evidence_index:
+            cited = [claim_index]
+        citations = "".join(f"[{index}]" for index in cited)
+        sentences.append(f"{text}{citations}。")
+    return "".join(sentences)
 
 
 def _single_hop_subject(facts: tuple[Evidence, ...]) -> str | None:

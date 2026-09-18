@@ -1,6 +1,5 @@
 import { ApiRequestError } from '../api/client'
 import type { Answer, AnswerStatus } from '../api/types'
-import ClaimList from './ClaimList'
 import DerivedAssociations from './DerivedAssociations'
 import EmptyState from './EmptyState'
 import ErrorState from './ErrorState'
@@ -119,26 +118,37 @@ export default function AnswerPanel({
         <p className="meta">错误码：{answer.error_code}</p>
       )}
 
-      {answer.text && <p className="answer__text">{answer.text}</p>}
-
-      {answer.claims.length > 0 && (
-        <section className="block" aria-label="直接事实">
-          <h3 className="block__title">
-            直接事实
-            <span className="badge badge--fact">来自本实体的原文</span>
-          </h3>
-          <ClaimList
-            claims={answer.claims}
-            evidenceIndex={evidenceIndex}
-            onSelectEvidence={onSelectEvidence}
-          />
-        </section>
-      )}
+      {answer.claims.length > 0 ? (
+        <p className="answer__text answer__text--cited">
+          {answer.claims.map((claim, claimIndex) => (
+            <span className="answer__sentence" key={`${claimIndex}-${claim.text.slice(0, 12)}`}>
+              {sentenceText(claim.text)}
+              {claim.evidence_ids.map((evidenceId) => {
+                const index = evidenceIndex.get(evidenceId)
+                return index === undefined ? null : (
+                  <button
+                    key={evidenceId}
+                    type="button"
+                    className="citation"
+                    aria-label={`查看引用 ${index}`}
+                    onClick={() => onSelectEvidence(evidenceId)}
+                  >
+                    [{index}]
+                  </button>
+                )
+              })}
+              。
+            </span>
+          ))}
+        </p>
+      ) : answer.text ? (
+        <p className="answer__text">{answer.text}</p>
+      ) : null}
 
       <DerivedAssociations
         associations={answer.derived_associations}
-        evidenceIndex={evidenceIndex}
-        onSelectEvidence={onSelectEvidence}
+        evidences={answer.evidences}
+        workspaceId={workspaceId}
       />
 
       {answer.warnings.length > 0 && (
@@ -155,7 +165,6 @@ export default function AnswerPanel({
       {answer.evidences.length > 0 && (
         <EvidenceDrawer
           evidences={answer.evidences}
-          workspaceId={workspaceId}
           open={drawerOpen}
           onToggle={onToggleDrawer}
           reveal={reveal}
@@ -177,7 +186,7 @@ export default function AnswerPanel({
         </div>
         <div>
           <dt>跳数</dt>
-          <dd>{answer.metrics.max_hops ?? '—'}</dd>
+          <dd>{answer.metrics.max_hops ?? '未使用'}</dd>
         </div>
         <div>
           <dt>证据</dt>
@@ -194,4 +203,8 @@ export default function AnswerPanel({
       </dl>
     </div>
   )
+}
+
+function sentenceText(text: string): string {
+  return text.trim().replace(/[。！？.!?]+$/, '')
 }

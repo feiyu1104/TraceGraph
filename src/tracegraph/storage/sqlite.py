@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
@@ -9,12 +10,25 @@ from tracegraph.core.contracts import (
     Chunk,
     Document,
     DocumentVersion,
+    ExtractionVocabulary,
     IngestionJob,
     IngestionStatus,
     Workspace,
 )
 
 _DEFAULT_WORKSPACE_NAME = "默认工作区"
+
+# Workspace 上允许覆盖抽取类型的三个可空列。全部 NULL 表示沿用适配器内置清单。
+# get_workspace 与 list_workspaces 共用这一个列清单：分开写两遍的话，加了列
+# 只改一处，另一处会静默读不到。
+_WORKSPACE_CUSTOM_COLUMNS = (
+    "custom_entity_types",
+    "custom_relation_types",
+    "custom_vocabulary",
+)
+_WORKSPACE_COLUMNS = ", ".join(
+    ("id", "name", "adapter_id", "created_at", *_WORKSPACE_CUSTOM_COLUMNS)
+)
 
 
 class SQLiteDocumentRepository:
@@ -43,21 +57,27 @@ class SQLiteDocumentRepository:
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO workspaces (id, name, adapter_id, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO workspaces (
+                    id, name, adapter_id, created_at,
+                    custom_entity_types, custom_relation_types, custom_vocabulary
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     workspace.id,
                     workspace.name,
                     workspace.adapter_id,
                     workspace.created_at,
+                    _dump_custom_types(workspace.custom_entity_types),
+                    _dump_custom_types(workspace.custom_relation_types),
+                    _dump_vocabulary(workspace.custom_vocabulary),
                 ),
             )
 
     def get_workspace(self, workspace_id: str) -> Workspace | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT id, name, adapter_id, created_at FROM workspaces WHERE id = ?",
+                f"SELECT {_WORKSPACE_COLUMNS} FROM workspaces WHERE id = ?",
                 (workspace_id,),
             ).fetchone()
         return _workspace_from_row(row) if row else None
@@ -65,8 +85,8 @@ class SQLiteDocumentRepository:
     def list_workspaces(self) -> tuple[Workspace, ...]:
         with self._lock:
             rows = self._connection.execute(
-                """
-                SELECT id, name, adapter_id, created_at
+                f"""
+                SELECT {_WORKSPACE_COLUMNS}
                 FROM workspaces
                 ORDER BY created_at, id
                 """
@@ -389,7 +409,12 @@ class SQLiteDocumentRepository:
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
                     adapter_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    -- 这个知识库自定义的抽取类型，JSON。NULL 表示沿用适配器
+                    -- 声明的清单。
+                    custom_entity_types TEXT,
+                    custom_relation_types TEXT,
+                    custom_vocabulary TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS documents (
@@ -446,6 +471,9 @@ class SQLiteDocumentRepository:
             # 必须赶在下面重建 documents 之前：重建按固定列清单搬数据，没补上
             # 的列会连同数据一起丢掉。
             self._adopt_timestamp_columns()
+            # 与上面几个没有先后依赖：它只动 workspaces，而 _adopt_documents_into_workspace
+            # 写 workspaces 时用的是显式列名。
+            self._adopt_workspace_custom_columns()
         with self._lock:
             # 重建要开关外键，而外键开关在事务内不生效，因此必须在上面的写事务提交之后。
             if not self._documents_schema_is_current():
@@ -524,6 +552,22 @@ class SQLiteDocumentRepository:
                     self._connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN {name} TEXT"
                     )
+
+    def _adopt_workspace_custom_columns(self) -> None:
+        """给既有库的 workspaces 补上自定义类型三列。
+
+        三列都可空，ADD COLUMN 不重写表。旧行留 NULL，也就是「没有自定义」，
+        与迁移前的行为完全一致 —— 不需要回填任何值。
+        """
+        columns = {
+            row["name"]
+            for row in self._connection.execute("PRAGMA table_info(workspaces)")
+        }
+        for name in _WORKSPACE_CUSTOM_COLUMNS:
+            if name not in columns:
+                self._connection.execute(
+                    f"ALTER TABLE workspaces ADD COLUMN {name} TEXT"
+                )
 
     def _documents_schema_is_current(self) -> bool:
         """documents 是否已是「workspace_id 非空 + 来源仅在 Workspace 内唯一」。
@@ -631,7 +675,82 @@ def _workspace_from_row(row: sqlite3.Row) -> Workspace:
         name=row["name"],
         adapter_id=row["adapter_id"],
         created_at=row["created_at"],
+        custom_entity_types=_load_custom_types(row["custom_entity_types"]),
+        custom_relation_types=_load_custom_types(row["custom_relation_types"]),
+        custom_vocabulary=_load_vocabulary(row["custom_vocabulary"]),
     )
+
+
+def _dump_custom_types(types: tuple[str, ...] | None) -> str | None:
+    return None if types is None else json.dumps(list(types), ensure_ascii=False)
+
+
+def _dump_vocabulary(vocabulary: ExtractionVocabulary | None) -> str | None:
+    """把词汇表写成 JSON。
+
+    刻意不走 dataclasses.asdict()：ExtractionVocabulary 的 __post_init__ 把
+    sections 包成了 MappingProxyType，asdict 与 deepcopy 都会抛 TypeError。
+    """
+    if vocabulary is None:
+        return None
+    return json.dumps(
+        {
+            "subject_type": vocabulary.subject_type,
+            "sections": {key: list(pair) for key, pair in vocabulary.sections.items()},
+            "separator": vocabulary.separator,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _load_json_column(raw: object) -> object | None:
+    """解析一个 JSON 列。
+
+    坏数据退回 None（等价于「没有自定义」）：一行读不懂的配置不该让整个知识库
+    无法访问。
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+def _load_custom_types(raw: object) -> tuple[str, ...] | None:
+    parsed = _load_json_column(raw)
+    if not isinstance(parsed, list):
+        return None
+    values = tuple(item for item in parsed if isinstance(item, str) and item.strip())
+    # 空清单在契约里是「一个类型都不允许」，写入端会拒绝。真在库里读到空清单，
+    # 当成「没有自定义」处理，比让这个知识库抽不出任何候选要好。
+    return values or None
+
+
+def _load_vocabulary(raw: object) -> ExtractionVocabulary | None:
+    parsed = _load_json_column(raw)
+    if not isinstance(parsed, dict):
+        return None
+    subject_type = parsed.get("subject_type")
+    sections = parsed.get("sections")
+    separator = parsed.get("separator", "、")
+    if not isinstance(subject_type, str) or not isinstance(sections, dict):
+        return None
+    if not isinstance(separator, str):
+        return None
+    pairs = {
+        key: tuple(value)
+        for key, value in sections.items()
+        # JSON 里 section 的值是 list，而契约声明的是 tuple，这里显式转回来。
+        if isinstance(key, str) and isinstance(value, list) and len(value) == 2
+    }
+    try:
+        return ExtractionVocabulary(
+            subject_type=subject_type, sections=pairs, separator=separator
+        )
+    except ValueError:
+        # 词汇表自身校验没过（例如 subject_type 全是空白）：当作没有自定义。
+        return None
 
 
 def _version_from_row(row: sqlite3.Row) -> DocumentVersion:

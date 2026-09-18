@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,12 @@ name = "tracegraph"
 version = "0.1.0"
 description = "Evidence-first GraphRAG application framework for domain knowledge"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
+authors = [
+    { name = "ensemble", email = "feiyucom@outlook.com" },
+]
 dependencies = [
     "fastapi>=0.115,<1.0",
     "pypdf>=5.0,<7.0",
@@ -25,6 +30,11 @@ dev = [
 
 [project.scripts]
 tracegraph = "tracegraph.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/feiyu1104/TraceGraph"
+Repository = "https://github.com/feiyu1104/TraceGraph"
+Issues = "https://github.com/feiyu1104/TraceGraph/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

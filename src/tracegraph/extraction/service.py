@@ -21,6 +21,7 @@ from tracegraph.core.ports import (
     DomainAdapter,
 )
 from tracegraph.domains.registry import AdapterRegistry, UnknownAdapterError
+from tracegraph.domains.scoped import effective_adapter
 from tracegraph.extraction.providers import (
     ExtractionDraft,
     ExtractionError,
@@ -110,6 +111,9 @@ class ExtractionService:
             adapter = self.adapters.resolve(workspace.adapter_id)
         except UnknownAdapterError as error:
             raise ExtractionAdapterUnavailableError(str(error)) from error
+        # 工作空间可以覆盖适配器的类型清单。在解析之后叠加，因此上面这段
+        # 「未知适配器」的错误语义不受影响。
+        adapter = effective_adapter(workspace, adapter)
 
         version = self._resolve_version(
             document_id, document_version_id, workspace_id=workspace.id

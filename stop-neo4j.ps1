@@ -14,6 +14,10 @@ $javaHome = if ($env:JAVA_HOME) {
 } else {
     [Environment]::GetEnvironmentVariable("JAVA_HOME", "User")
 }
+if (-not $javaHome -or -not (Test-Path -LiteralPath (Join-Path $javaHome "bin\java.exe"))) {
+    Write-Host "Neo4j is not configured for this project."
+    exit 0
+}
 $expectedJava = (Resolve-Path -LiteralPath (Join-Path $javaHome "bin\java.exe")).Path
 $processes = Get-Process -Name "java" -ErrorAction SilentlyContinue |
     Where-Object {

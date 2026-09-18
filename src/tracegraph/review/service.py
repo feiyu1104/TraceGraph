@@ -28,6 +28,7 @@ from tracegraph.core.ports import (
     DomainAdapter,
 )
 from tracegraph.domains.registry import AdapterRegistry, UnknownAdapterError
+from tracegraph.domains.scoped import effective_adapter
 
 
 class CandidateReviewError(RuntimeError):
@@ -426,14 +427,19 @@ class CandidateReviewService:
         return relation
 
     def _adapter(self, workspace_id: str) -> DomainAdapter:
-        """当前 Workspace 的适配器：类型白名单的唯一来源。"""
+        """当前 Workspace 生效的适配器：类型白名单的唯一来源。
+
+        生效值包含工作空间自己的覆盖，因此人工审核拒绝的类型与抽取提示词、
+        候选白名单三处始终是同一份清单。
+        """
         workspace = self.documents.get_workspace(workspace_id)
         if workspace is None:
             raise CandidateNotFoundError(f"未找到 Workspace：{workspace_id}")
         try:
-            return self.adapters.resolve(workspace.adapter_id)
+            base = self.adapters.resolve(workspace.adapter_id)
         except UnknownAdapterError as error:
             raise CandidateReviewError(str(error)) from error
+        return effective_adapter(workspace, base)
 
 
 def _require_owner(owner: str, workspace_id: str, candidate_id: str) -> None:

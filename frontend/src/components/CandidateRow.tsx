@@ -223,7 +223,7 @@ export default function CandidateRow(props: CandidateRowProps) {
 
       {candidate.is_published && (
         <p className="candidate__note">
-          这条候选已经发布到图谱（图对象 {candidate.graph_id ?? '—'}）。
+          这条候选已经发布到图谱（图对象 {candidate.graph_id ?? '未知'}）。
           撤销发布尚未实现，因此不能再修改或退回。
         </p>
       )}

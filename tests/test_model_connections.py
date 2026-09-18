@@ -1092,16 +1092,23 @@ def test_concurrent_reads_never_mix_default_id_and_generator() -> None:
     expected = {GENERATOR_EXTRACTIVE: extractive, "stub": stub}
     readings: list[tuple[str, object]] = []
     stop = threading.Event()
+    observed = {model_id: threading.Event() for model_id in expected}
 
     def read_repeatedly() -> None:
         while not stop.is_set():
             model_id, generator = handle.current.resolve_selection(None)
             readings.append((model_id, generator))
+            observed[model_id].set()
 
     readers = [threading.Thread(target=read_repeatedly) for _ in range(4)]
     for reader in readers:
         reader.start()
     try:
+        # 先确定读线程真的观察到初始快照，再换成第二份并等它也被观察到。
+        # 不能假设主线程连续 replace 2000 次期间操作系统一定会调度读线程。
+        assert observed[GENERATOR_EXTRACTIVE].wait(timeout=10)
+        handle.replace(second)
+        assert observed["stub"].wait(timeout=10)
         for index in range(2000):
             handle.replace(second if index % 2 else first)
     finally:

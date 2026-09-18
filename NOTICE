@@ -1,0 +1,8 @@
+TraceGraph
+
+This product includes a small, unmodified demonstration subset from DUTMed.
+DUTMed is distributed under the Apache License, Version 2.0. A copy of its
+license is available at examples/data/DUTMED-LICENSE.txt.
+
+The bundled records are provided for software demonstration and learning only.
+They do not constitute medical advice.

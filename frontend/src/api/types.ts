@@ -175,12 +175,81 @@ export interface ModelsResponse {
   models: ModelInfo[]
 }
 
+export interface ConnectionModel {
+  id: string
+  label: string
+  model: string
+}
+
+/** 模型连接的安全元数据。服务端永远不会把 api_key 返回给浏览器。 */
+export interface ModelConnection {
+  id: string
+  label: string
+  base_url: string
+  timeout: number
+  has_api_key: boolean
+  models: ConnectionModel[]
+}
+
+export interface ModelConnectionsResponse {
+  default: string
+  connections: ModelConnection[]
+}
+
+export interface ModelDiscoveryResponse {
+  base_url: string
+  models: string[]
+}
+
+export interface ModelConnectionInput {
+  label: string
+  base_url: string
+  timeout: number
+  api_key?: string
+  models: ConnectionModel[]
+}
+
+/** 离线（不调用模型）抽取用的章节词汇表。 */
+export interface WorkspaceVocabulary {
+  subject_type: string
+  /** 章节标题 -> [实体类型, 关系类型]。 */
+  sections: Record<string, string[]>
+  separator: string
+}
+
+/**
+ * 这个知识库覆盖掉的抽取类型。每一项为 null 表示沿用适配器内置清单，因此
+ * 可以只覆盖其中一项。整个 custom_types 为 null 表示三项全部沿用内置。
+ */
+export interface WorkspaceCustomTypes {
+  entity_types: string[] | null
+  relation_types: string[] | null
+  vocabulary: WorkspaceVocabulary | null
+}
+
 /** 一个知识库。adapter_id 只能由服务端在建库时写入，前端没有修改入口。 */
 export interface WorkspaceInfo {
   id: string
   name: string
   adapter_id: string
   created_at: string
+  custom_types: WorkspaceCustomTypes | null
+}
+
+/**
+ * 算出这个知识库真正生效的类型清单。
+ *
+ * 审核界面的类型下拉必须用它，不能用 /adapters 里那份内置清单：自定义类型的
+ * 知识库里，内置清单里的类型服务端会拒绝，让用户选得到却提交不了。
+ */
+export function effectiveTypes(
+  workspace: WorkspaceInfo | null,
+  adapter: AdapterInfo | null,
+  kind: 'entity_types' | 'relation_types',
+): string[] {
+  const custom = workspace?.custom_types?.[kind]
+  if (custom && custom.length > 0) return custom
+  return adapter?.[kind] ?? []
 }
 
 export interface WorkspacesResponse {

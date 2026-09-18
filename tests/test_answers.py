@@ -395,8 +395,10 @@ def test_answer_text_comes_only_from_claims() -> None:
 
     assert answer.claims
     assert answer.derived_associations
-    # 正文逐行等于 claims 的渲染结果 —— 推导关联没有第二次出场的机会。
-    assert answer.text == compose_text(answer.claims)
+    # 正文是一段由已校验 claims 组成的带引用回答；推导关联没有第二次出场。
+    assert answer.text == compose_text(answer.claims, answer.evidences)
+    assert "\n" not in answer.text
+    assert not answer.text.startswith("-")
     for association in answer.derived_associations:
         assert association.text not in answer.text
 

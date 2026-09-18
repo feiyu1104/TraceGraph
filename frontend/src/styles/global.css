@@ -44,18 +44,19 @@ figure {
 }
 
 a {
-  color: var(--green-700);
-  text-decoration-color: color-mix(in srgb, var(--green-600) 40%, transparent);
+  color: var(--accent-700);
+  text-decoration-color: color-mix(in srgb, var(--accent-600) 40%, transparent);
   text-underline-offset: 3px;
 }
 
 a:hover {
-  color: var(--green-800);
+  color: var(--accent-800);
 }
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
   color: inherit;
 }
@@ -111,9 +112,9 @@ textarea {
 }
 
 .badge--fact {
-  border-color: color-mix(in srgb, var(--green-600) 28%, transparent);
-  background: var(--green-050);
-  color: var(--green-700);
+  border-color: color-mix(in srgb, var(--accent-600) 28%, transparent);
+  background: var(--accent-050);
+  color: var(--accent-700);
 }
 
 .badge--derived {
@@ -148,24 +149,50 @@ textarea {
 }
 
 .button--primary {
-  border-color: var(--green-700);
-  background: var(--green-700);
-  color: #fff;
+  border-color: var(--accent-solid);
+  background: var(--accent-solid);
+  color: var(--on-accent);
+}
+
+.button--compact {
+  padding: var(--space-1) var(--space-3);
+}
+
+.button--danger {
+  border-color: var(--danger-solid);
+  background: var(--danger-solid);
+  color: var(--on-accent);
+}
+
+.button--danger:hover:not(:disabled) {
+  border-color: var(--danger-solid-hover);
+  background: var(--danger-solid-hover);
+}
+
+.button--danger-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--danger-700);
+}
+
+.button--danger-ghost:hover:not(:disabled) {
+  border-color: var(--danger-100);
+  background: var(--danger-050);
 }
 
 .button--primary:hover:not(:disabled) {
-  border-color: var(--green-800);
-  background: var(--green-800);
+  border-color: var(--accent-solid-hover);
+  background: var(--accent-solid-hover);
 }
 
 .button--ghost {
   border-color: transparent;
   background: transparent;
-  color: var(--green-700);
+  color: var(--accent-700);
 }
 
 .button--ghost:hover:not(:disabled) {
-  background: var(--green-050);
+  background: var(--accent-050);
 }
 
 .button:disabled {
@@ -192,6 +219,16 @@ textarea {
   border-radius: var(--radius-md);
   background: var(--surface);
   transition: border-color 120ms ease;
+}
+
+.field__input--mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.field__input:disabled {
+  background: var(--surface-sunken);
+  color: var(--ink-500);
 }
 
 .field__input:hover {
@@ -226,12 +263,12 @@ textarea {
 }
 
 .banner--ok {
-  border-left-color: var(--green-600);
-  background: var(--green-050);
+  border-left-color: var(--accent-600);
+  background: var(--accent-050);
 }
 
 .banner--ok .banner__label {
-  color: var(--green-800);
+  color: var(--accent-800);
 }
 
 .banner--warn {

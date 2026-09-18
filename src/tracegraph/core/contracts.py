@@ -46,17 +46,54 @@ DEFAULT_WORKSPACE_ADAPTER_ID = "medical"
 
 
 @dataclass(frozen=True, slots=True)
+class ExtractionVocabulary:
+    """适配器为「不调用在线模型」的确定性抽取给出的章节词汇表。
+
+    它把文档自身的章节结构接到本领域声明的类型上：`subject_type` 是文档标题
+    （分块定位符的第一层）指向的实体类型，`sections` 把章节标题映射到
+    （实体类型, 关系类型）。领域词汇只出现在适配器里，抽取服务与提示词都不
+    认识任何一个具体章节名。
+
+    适配器不给词汇表（返回 None）表示该领域没有可确定抽取的章节约定，此时
+    摘录式抽取如实产出 0 条候选，而不是猜一个类型。
+    """
+
+    subject_type: str
+    sections: Mapping[str, tuple[str, str]]
+    # 一个章节里并列写多个条目时的分隔符。它和章节标题一样属于「这份领域的
+    # 文档长什么样」，因此由适配器给出，抽取服务不认识任何具体的分隔符。
+    separator: str = "、"
+
+    def __post_init__(self) -> None:
+        if not self.subject_type.strip():
+            raise ValueError("抽取词汇表必须给出 subject_type")
+        if not self.separator:
+            raise ValueError("抽取词汇表必须给出一个非空的分隔符")
+        object.__setattr__(self, "sections", MappingProxyType(dict(self.sections)))
+
+
+@dataclass(frozen=True, slots=True)
 class Workspace:
     """一个知识场景的隔离单位。
 
-    目前只有文档归属这一层含义：adapter_id 只是记录这份数据按哪个领域
-    适配器组织，本阶段不做适配器动态加载。
+    adapter_id 记录这份数据按哪个领域适配器组织，本阶段不做适配器动态加载。
+
+    三个 custom_* 字段允许这个知识库覆盖适配器声明的抽取类型，是用户自定义
+    领域的唯一入口。适配器注册表本身依然不可变（见 domains/registry.py）：
+    自定义只影响这一个知识库，不会动摇服务端的适配器目录。
     """
 
     id: str
     name: str
     adapter_id: str
     created_at: str
+    # None 表示「沿用适配器的内置清单」，非 None 表示「覆盖」。
+    # 两个字段互相独立：可以只覆盖其中一个。
+    custom_entity_types: tuple[str, ...] | None = None
+    custom_relation_types: tuple[str, ...] | None = None
+    # None 表示沿用适配器的词汇表。适配器不给词汇表时，摘录式抽取如实产出
+    # 0 条候选 —— 这里留 None 与那个行为一致。
+    custom_vocabulary: ExtractionVocabulary | None = None
 
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.name.strip():
@@ -65,6 +102,15 @@ class Workspace:
             raise ValueError("Workspace requires a non-empty adapter_id")
         if not self.created_at.strip():
             raise ValueError("Workspace requires created_at")
+        # 空元组是「一个类型都不允许」，不是「没自定义」。真让它落库，这个
+        # 知识库会安静地抽不出任何候选。写入端（POST /workspaces）也会拦，
+        # 这里再拦一次是因为测试和迁移脚本会绕过 API 直接构造 Workspace。
+        for field_name in ("custom_entity_types", "custom_relation_types"):
+            value = getattr(self, field_name)
+            if value is not None and not value:
+                raise ValueError(
+                    f"{field_name} 留空表示不自定义，请传 None 而不是空列表"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,33 +492,6 @@ class CandidateKind(StrEnum):
 
     ENTITY = "entity"
     RELATION = "relation"
-
-
-@dataclass(frozen=True, slots=True)
-class ExtractionVocabulary:
-    """适配器为「不调用在线模型」的确定性抽取给出的章节词汇表。
-
-    它把文档自身的章节结构接到本领域声明的类型上：`subject_type` 是文档标题
-    （分块定位符的第一层）指向的实体类型，`sections` 把章节标题映射到
-    （实体类型, 关系类型）。领域词汇只出现在适配器里，抽取服务与提示词都不
-    认识任何一个具体章节名。
-
-    适配器不给词汇表（返回 None）表示该领域没有可确定抽取的章节约定，此时
-    摘录式抽取如实产出 0 条候选，而不是猜一个类型。
-    """
-
-    subject_type: str
-    sections: Mapping[str, tuple[str, str]]
-    # 一个章节里并列写多个条目时的分隔符。它和章节标题一样属于「这份领域的
-    # 文档长什么样」，因此由适配器给出，抽取服务不认识任何具体的分隔符。
-    separator: str = "、"
-
-    def __post_init__(self) -> None:
-        if not self.subject_type.strip():
-            raise ValueError("抽取词汇表必须给出 subject_type")
-        if not self.separator:
-            raise ValueError("抽取词汇表必须给出一个非空的分隔符")
-        object.__setattr__(self, "sections", MappingProxyType(dict(self.sections)))
 
 
 @dataclass(frozen=True, slots=True)

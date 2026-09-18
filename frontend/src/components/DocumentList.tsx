@@ -78,7 +78,7 @@ export default function DocumentList({
                       <span className="meta">
                         最新版本{' '}
                         <code title={document.latest_version_id ?? ''}>
-                          {document.latest_version_id ? shortId(document.latest_version_id) : '—'}
+                          {document.latest_version_id ? shortId(document.latest_version_id) : '暂无'}
                         </code>
                       </span>
                       <span className="meta">切片 {document.chunk_count}</span>

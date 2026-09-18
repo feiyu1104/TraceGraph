@@ -1,30 +1,32 @@
 /* 设计令牌：颜色、字号、间距、圆角与阴影只在这里定义一次。
-   方向是「安静的专业医学知识工作台」—— 暖白纸面、深墨绿主色、深灰黑正文，
+   方向是「安静、可信的通用知识工作台」：冷调雾灰底色、深海军蓝主色、蓝灰正文，
    琥珀色专门留给推导关联，红色只用于错误与紧急提示。 */
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
 
-  /* 深墨绿：主要操作与直接事实 */
-  --green-900: #0d3728;
-  --green-800: #10452f;
-  --green-700: #14553e;
-  --green-600: #176b4d;
-  --green-500: #2a8462;
-  --green-100: #e2efe8;
-  --green-050: #eff5f1;
+  /* 海军蓝：主要操作与直接事实 */
+  --accent-900: #17233f;
+  --accent-800: #20345d;
+  --accent-700: #2d477a;
+  --accent-600: #3c5d96;
+  --accent-500: #5875aa;
+  --accent-100: #dce4f2;
+  --accent-050: #eef2f8;
+  --accent-solid: #2d477a;
+  --accent-solid-hover: #20345d;
 
-  /* 暖白：页面底色与承托面 */
-  --paper: #faf8f3;
-  --surface: #ffffff;
-  --surface-sunken: #f4f1e9;
-  --surface-quiet: #f7f5f0;
+  /* 冷灰：页面底色与承托面 */
+  --paper: #f4f6f9;
+  --surface: #fbfcfe;
+  --surface-sunken: #eceff4;
+  --surface-quiet: #f0f3f7;
 
   /* 深灰黑：正文 */
-  --ink-900: #131a16;
-  --ink-700: #232c27;
-  --ink-500: #55605a;
-  --ink-400: #7c857f;
+  --ink-900: #151923;
+  --ink-700: #29303c;
+  --ink-500: #586273;
+  --ink-400: #7c8798;
 
   /* 琥珀：推导关联与提醒 */
   --amber-800: #7a4a0c;
@@ -32,24 +34,28 @@
   --amber-600: #a06a18;
   --amber-100: #fbeed6;
   --amber-050: #fdf8ec;
+  --amber-solid: #8f5a12;
 
-  /* 红：仅错误与紧急医疗提示 */
+  /* 红：仅错误与高风险提示 */
   --danger-700: #96201a;
   --danger-600: #b3261e;
   --danger-100: #f8e2e0;
   --danger-050: #fdf1f0;
+  --danger-solid: #96201a;
+  --danger-solid-hover: #7e1914;
 
-  --line: #e2ded4;
-  --line-strong: #c9c3b6;
+  --line: #dce1e9;
+  --line-strong: #bec7d4;
+  --on-accent: #f8fbf9;
 
   --radius-sm: 5px;
   --radius-md: 9px;
   --radius-lg: 13px;
 
-  --shadow-sm: 0 1px 2px rgb(19 26 22 / 5%);
-  --shadow-md: 0 4px 18px rgb(19 26 22 / 6%);
+  --shadow-sm: 0 1px 2px rgb(22 31 47 / 6%);
+  --shadow-md: 0 8px 24px rgb(22 31 47 / 8%);
 
-  --font-sans: "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC",
+  --font-sans: "Aptos", "Segoe UI", "Microsoft YaHei", "PingFang SC",
     "Hiragino Sans GB", system-ui, -apple-system, sans-serif;
   --font-serif: "Iowan Old Style", "Palatino Linotype", Georgia, "Songti SC",
     "SimSun", serif;
@@ -73,6 +79,45 @@
   --space-6: 30px;
   --space-7: 44px;
 
-  --focus: 0 0 0 3px rgb(23 107 77 / 32%);
+  --focus: 0 0 0 3px rgb(60 93 150 / 30%);
   --focus-danger: 0 0 0 3px rgb(179 38 30 / 28%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent-900: #e9edf7;
+    --accent-800: #ccd6ec;
+    --accent-700: #aebee1;
+    --accent-600: #91a7d3;
+    --accent-500: #728bbd;
+    --accent-100: #293753;
+    --accent-050: #202b42;
+    --accent-solid: #425e91;
+    --accent-solid-hover: #506da4;
+    --paper: #101319;
+    --surface: #181d26;
+    --surface-sunken: #0d1118;
+    --surface-quiet: #202631;
+    --ink-900: #edf0f6;
+    --ink-700: #d7dce6;
+    --ink-500: #aeb7c6;
+    --ink-400: #8994a5;
+    --amber-800: #f3cf8d;
+    --amber-700: #e1b96e;
+    --amber-600: #c9933f;
+    --amber-100: #49361b;
+    --amber-050: #302617;
+    --amber-solid: #8f5a12;
+    --danger-700: #ffb5ae;
+    --danger-600: #e5766d;
+    --danger-100: #542b28;
+    --danger-050: #382321;
+    --danger-solid: #a83d36;
+    --danger-solid-hover: #bc4b43;
+    --line: #303846;
+    --line-strong: #4a5668;
+    --on-accent: #f3faf6;
+    --shadow-sm: 0 1px 2px rgb(2 6 4 / 28%);
+    --shadow-md: 0 8px 24px rgb(2 6 4 / 32%);
+  }
 }

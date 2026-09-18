@@ -8,7 +8,7 @@ from tracegraph.storage import InMemoryDocumentRepository, InMemoryGraphReposito
 
 
 def main() -> None:
-    default_source = Path(__file__).resolve().parents[2] / "DUTMed" / "data" / "症状.json"
+    default_source = Path(__file__).resolve().parent / "data" / "dutmed-demo.jsonl"
     parser = argparse.ArgumentParser(description="使用真实 DUTMed 数据运行完整链路")
     parser.add_argument("--source", type=Path, default=default_source)
     parser.add_argument("--limit", type=int, default=3)

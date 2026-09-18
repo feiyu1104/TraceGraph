@@ -19,6 +19,34 @@ function Test-LocalPort([int]$Port) {
     }
 }
 
+function Get-PortOccupant([int]$Port) {
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    # No listener, or one we cannot attribute, both count as "not occupied".
+    if (-not $listener -or -not $listener.OwningProcess) { return $null }
+    return Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)" -ErrorAction SilentlyContinue
+}
+
+# A stale instance is left by a previous start.ps1: on Windows, Ctrl+C often only
+# ends PowerShell itself, so the uvicorn child keeps holding port 8000 and the next
+# run is rejected as a port conflict.
+function Stop-StaleInstance($Process) {
+    $commandLine = [string]$Process.CommandLine
+    $looksLikeTraceGraph =
+        $commandLine -like "*$projectRoot\.venv\Scripts\python.exe*" -and
+        $commandLine -like "*uvicorn tracegraph.bootstrap:app*"
+    if (-not $looksLikeTraceGraph) {
+        throw "Port 8000 is held by an unrelated process (PID $($Process.ProcessId)). Stop it yourself and retry."
+    }
+    Write-Host "Port 8000 is held by a previous TraceGraph instance (PID $($Process.ProcessId)); stopping it." -ForegroundColor Yellow
+    Stop-Process -Id $Process.ProcessId -Force -ErrorAction Stop
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (-not (Test-LocalPort 8000)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Port 8000 is still in use after stopping PID $($Process.ProcessId)"
+}
+
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $envFile = Join-Path $projectRoot ".env"
 if (Test-Path -LiteralPath $envFile) {
@@ -109,7 +137,12 @@ if (-not (Test-Path -LiteralPath $python)) {
     throw "Project virtual environment was not found: $python"
 }
 if (Test-LocalPort 8000) {
-    throw "Port 8000 is already in use"
+    $occupant = Get-PortOccupant 8000
+    # Reachable, but not necessarily attributable; never kill what we cannot identify.
+    if (-not $occupant) {
+        throw "Port 8000 is already in use, but its owner could not be identified."
+    }
+    Stop-StaleInstance $occupant
 }
 
 if ($Mode -eq "neo4j" -and -not $blocked) {

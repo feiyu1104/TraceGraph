@@ -1,22 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 
-import {
-  ApiRequestError,
-  SUPPORTED_UPLOAD_SUFFIXES,
-  uploadDocument,
-} from '../api/client'
+import { ApiRequestError, SUPPORTED_UPLOAD_SUFFIXES, uploadDocument } from '../api/client'
 import type { IngestionResult } from '../api/types'
 import ErrorState from './ErrorState'
 
 const ACCEPT = SUPPORTED_UPLOAD_SUFFIXES.join(',')
 
 // 与后端 ingestion/text.py 的 UNSUPPORTED_DOCUMENT_MESSAGE 对应。
-const SUPPORTED_HINT =
-  '支持 TXT、Markdown（.md）、JSON、JSONL、CSV，以及可以提取文本的 PDF。'
+const SUPPORTED_HINT = 'TXT / MD / JSON / JSONL / CSV / PDF'
 
-const SCOPE_NOTICE =
-  '普通上传文档会进入 SQLite 文本知识库，可参与关键词检索；' +
-  '当前不会自动生成 Neo4j 实体关系，因此不会自动参与图关系和多跳推导。'
+const SCOPE_NOTICE = '上传即参与关键词检索；未经审核发布的内容不会写入图谱。'
 
 const STATUS_TEXT: Record<string, string> = {
   succeeded: '入库成功',
@@ -54,36 +47,36 @@ export default function DocumentImport({
   onImported,
 }: DocumentImportProps) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const [file, setFile] = useState<File | null>(null)
+  const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
   const [requestError, setRequestError] = useState<ApiRequestError | null>(null)
   const [result, setResult] = useState<IngestionResult | null>(null)
-  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     onBusyChange(busy)
   }, [busy, onBusyChange])
 
-  function pick(selected: File | null) {
+  // 选中文件即上传：没有单独的确认按钮，所以每次选完都要清空 input，
+  // 否则重选同一份文件不会触发 change，补传就无从下手。
+  function pick(event: React.ChangeEvent<HTMLInputElement>) {
+    const selected = event.target.files?.[0] ?? null
+    event.target.value = ''
+    if (!selected) return
     setResult(null)
     setRequestError(null)
-    setLocalError(null)
-    if (selected && maxUploadBytes !== null && selected.size > maxUploadBytes) {
+    if (maxUploadBytes !== null && selected.size > maxUploadBytes) {
       // 先在这里拦一次，省掉一次注定失败的上传；后端仍会独立复检。
       setLocalError(
         `${selected.name} 有 ${formatSize(selected.size)}，超过 ${formatSize(maxUploadBytes)} 上限。`,
       )
-      setFile(null)
       return
     }
-    setFile(selected)
+    setLocalError(null)
+    void submit(selected)
   }
 
-  async function submit() {
-    if (!file || busy) return
+  async function submit(file: File) {
     setBusy(true)
-    setRequestError(null)
-    setResult(null)
     try {
       setResult(await uploadDocument(file, workspaceId))
       onImported?.()
@@ -98,58 +91,33 @@ export default function DocumentImport({
     }
   }
 
-  function reset() {
-    pick(null)
-    if (inputRef.current) inputRef.current.value = ''
-  }
-
   return (
     <div className="importer">
       <p className="importer__target">
-        文档将进入：<strong>{workspaceName}</strong>
+        进入：<strong>{workspaceName}</strong>
       </p>
 
       <label className="field">
-        <span className="field__label">选择文档</span>
+        <span className="field__label">
+          选择文档{busy && <span className="meta"> · 上传中…</span>}
+        </span>
         <input
           ref={inputRef}
-          className="field__input field__input--file"
+          className="field__input"
           type="file"
           accept={ACCEPT}
           disabled={busy}
-          onChange={(event) => pick(event.target.files?.[0] ?? null)}
+          onChange={pick}
         />
       </label>
 
       <p className="importer__hint">{SUPPORTED_HINT}</p>
-
-      {file && !localError && (
-        <p className="importer__file">
-          待上传：<strong>{file.name}</strong> · {formatSize(file.size)}
-        </p>
-      )}
 
       {localError && (
         <p className="importer__error" role="alert">
           {localError}
         </p>
       )}
-
-      <div className="importer__actions">
-        <button
-          type="button"
-          className="button button--primary"
-          onClick={() => void submit()}
-          disabled={busy || !file}
-        >
-          {busy ? '上传中…' : '上传并入库'}
-        </button>
-        {(file || result || requestError) && (
-          <button type="button" className="button" onClick={reset} disabled={busy}>
-            清除
-          </button>
-        )}
-      </div>
 
       {requestError && <ErrorState error={requestError} />}
 
@@ -159,25 +127,11 @@ export default function DocumentImport({
             <strong>{STATUS_TEXT[result.job.status] ?? result.job.status}</strong>
             {' · '}
             {result.document.source_name}
+            {' · 版本 '}
+            {result.version.number}
+            {' · 切片 '}
+            {result.job.processed_chunks}
           </p>
-          <dl className="metrics">
-            <div>
-              <dt>知识库</dt>
-              <dd>{workspaceName}</dd>
-            </div>
-            <div>
-              <dt>文档 ID</dt>
-              <dd>{result.document.id}</dd>
-            </div>
-            <div>
-              <dt>版本</dt>
-              <dd>{result.version.number}</dd>
-            </div>
-            <div>
-              <dt>切片</dt>
-              <dd>{result.job.processed_chunks}</dd>
-            </div>
-          </dl>
           {result.job.status === 'skipped' && (
             <p className="importer__hint">
               内容哈希与已有版本一致，没有新建版本，已有切片继续可用。

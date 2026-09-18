@@ -5,6 +5,7 @@
 统一决定，因此抽取器不可能伪造归属，也不可能把候选写到抽取任务之外。
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 from typing import Protocol
@@ -24,6 +25,13 @@ from tracegraph.generation.providers import (
 # 分块定位符的分层分隔符，写法由 ingestion/text.py 决定；这里只是按同样的
 # 约定把「主体 > 章节」拆回来。
 _LOCATOR_SEPARATOR = " > "
+
+# 在线模型处理长文档时按小批请求，避免一个超长请求占满整个超时时间。
+# 并发保持在 2：既缩短总耗时，也不给用户配置的第三方网关制造突发流量。
+_MODEL_BATCH_MAX_CHUNKS = 10
+_MODEL_BATCH_MAX_CHARACTERS = 12_000
+_MODEL_BATCH_WORKERS = 2
+_MODEL_NETWORK_ATTEMPTS = 2
 
 # 抽取器与发布服务必须按同一个规范化名称合并实体，因此规则只有一份，
 # 住在 core/identity.py；这里保留同名导入，本模块的调用方不受影响。
@@ -137,16 +145,41 @@ class ModelCandidateExtractor:
     def extract(
         self, chunks: tuple[Chunk, ...], adapter: DomainAdapter
     ) -> ExtractionDraft:
+        batches = _model_batches(chunks) or ((),)
+        system_prompt = extraction_system_prompt(adapter)
         try:
-            content = self.completer.complete(
-                extraction_system_prompt(adapter), extraction_user_prompt(chunks)
-            )
-            return decode_extraction(decode_content_json(content))
+            if len(batches) == 1:
+                drafts = (self._extract_batch(system_prompt, batches[0]),)
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=min(_MODEL_BATCH_WORKERS, len(batches))
+                ) as executor:
+                    drafts = tuple(
+                        executor.map(
+                            lambda batch: self._extract_batch(system_prompt, batch),
+                            batches,
+                        )
+                    )
+            return _merge_drafts(drafts)
         except GenerationNetworkError as error:
             raise ExtractionNetworkError(str(error)) from error
         except GenerationResponseError as error:
             # 解不出 JSON 与结构不合法是同一类失败：模型没有按约定回答。
             raise ExtractionResponseError(str(error)) from error
+
+    def _extract_batch(
+        self, system_prompt: str, chunks: tuple[Chunk, ...]
+    ) -> ExtractionDraft:
+        for attempt in range(_MODEL_NETWORK_ATTEMPTS):
+            try:
+                content = self.completer.complete(
+                    system_prompt, extraction_user_prompt(chunks)
+                )
+                return decode_extraction(decode_content_json(content))
+            except GenerationNetworkError:
+                if attempt + 1 == _MODEL_NETWORK_ATTEMPTS:
+                    raise
+        raise AssertionError("unreachable")
 
 
 def extraction_system_prompt(adapter: DomainAdapter) -> str:
@@ -182,6 +215,47 @@ def extraction_user_prompt(chunks: tuple[Chunk, ...]) -> str:
     return (
         f"文档片段（共 {len(payload)} 条，id 只能原样引用）："
         f"{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _model_batches(chunks: tuple[Chunk, ...]) -> tuple[tuple[Chunk, ...], ...]:
+    batches: list[tuple[Chunk, ...]] = []
+    current: list[Chunk] = []
+    current_characters = 0
+    for chunk in chunks:
+        chunk_characters = len(chunk.content) + len(chunk.locator)
+        if current and (
+            len(current) >= _MODEL_BATCH_MAX_CHUNKS
+            or current_characters + chunk_characters > _MODEL_BATCH_MAX_CHARACTERS
+        ):
+            batches.append(tuple(current))
+            current = []
+            current_characters = 0
+        current.append(chunk)
+        current_characters += chunk_characters
+    if current:
+        batches.append(tuple(current))
+    return tuple(batches)
+
+
+def _merge_drafts(drafts: tuple[ExtractionDraft, ...]) -> ExtractionDraft:
+    entities: dict[tuple[str, str], EntityDraft] = {}
+    relations: dict[tuple[str, str, str], RelationDraft] = {}
+    for draft in drafts:
+        for entity in draft.entities:
+            for chunk_id in entity.evidence_chunk_ids:
+                _merge_entity(entities, entity.name, entity.type, chunk_id)
+        for relation in draft.relations:
+            for chunk_id in relation.evidence_chunk_ids:
+                _merge_relation(
+                    relations,
+                    relation.source_name,
+                    relation.target_name,
+                    relation.type,
+                    chunk_id,
+                )
+    return ExtractionDraft(
+        entities=tuple(entities.values()), relations=tuple(relations.values())
     )
 
 

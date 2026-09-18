@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
+from threading import RLock
 import uuid
 
 from tracegraph.core.contracts import (
@@ -73,6 +74,10 @@ class TextIngestionService:
         self.chunk_size = chunk_size
         # 不装配时只入库解析结果，不保留原件：既有调用方因此不受影响。
         self.original_store = original_store
+        # 原件落盘与数据库确认是一条不可拆开的本地事务。相同版本的两个请求
+        # 若同时执行，失败方的清理可能删掉成功方刚写好的文件；当前应用是单
+        # 进程服务，用一把进程内锁把整条入库事务串行化即可避免这种竞态。
+        self._ingestion_lock = RLock()
 
     def ingest_file(
         self, path: Path, workspace_id: str = DEFAULT_WORKSPACE_ID
@@ -99,6 +104,27 @@ class TextIngestionService:
         source_name: str,
         content: str,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        original: bytes | None = None,
+    ) -> IngestionResult:
+        """把一次文档入库作为完整事务串行执行。
+
+        文件解析在 `ingest_bytes()` 中已经完成，不占这把锁；锁保护的是文档与
+        版本判定、原件写入、数据库确认及失败清理。这样并发上传同一版本时，
+        后一个请求会重新读取前一个请求已经提交的状态，而不会清理它的原件。
+        """
+        with self._ingestion_lock:
+            return self._ingest_text(
+                source_name,
+                content,
+                workspace_id,
+                original=original,
+            )
+
+    def _ingest_text(
+        self,
+        source_name: str,
+        content: str,
+        workspace_id: str,
         original: bytes | None = None,
     ) -> IngestionResult:
         normalized_source = source_name.strip()

@@ -431,6 +431,48 @@ def test_model_completer_wraps_generation_errors() -> None:
         )
 
 
+def test_model_extraction_splits_long_documents_into_small_requests() -> None:
+    adapter = build_default_adapter_registry().resolve("general")
+    completer = _FakeCompleter('{"entities": [], "relations": []}')
+    chunks = tuple(
+        Chunk(
+            id=f"chk-{index}",
+            document_id="doc-1",
+            document_version_id="ver-1",
+            index=index,
+            content=f"第 {index} 段",
+            locator=f"第 {index} 段",
+        )
+        for index in range(11)
+    )
+
+    draft = ModelCandidateExtractor(completer).extract(chunks, adapter)
+
+    assert draft.entities == ()
+    assert len(completer.calls) == 2
+    assert all('"id": "chk-' in user_prompt for _, user_prompt in completer.calls)
+
+
+def test_model_extraction_retries_one_transient_network_failure() -> None:
+    adapter = build_default_adapter_registry().resolve("general")
+
+    class _FlakyCompleter:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise GenerationNetworkError("暂时无法连接模型服务。")
+            return '{"entities": [], "relations": []}'
+
+    completer = _FlakyCompleter()
+    draft = ModelCandidateExtractor(completer).extract((), adapter)
+
+    assert draft.entities == ()
+    assert completer.calls == 2
+
+
 def test_unknown_model_and_unsupported_kind_are_reported() -> None:
     documents = InMemoryDocumentRepository()
     result = _ingest(documents)

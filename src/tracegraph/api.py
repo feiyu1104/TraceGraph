@@ -32,6 +32,7 @@ from tracegraph.core.contracts import (
     Evidence,
     Entity,
     ExtractionRun,
+    ExtractionVocabulary,
     Feedback,
     FeedbackKind,
     GraphPath,
@@ -148,11 +149,38 @@ class QueryRequest(BaseModel):
     workspace_id: str = DEFAULT_WORKSPACE_ID
 
 
+class WorkspaceVocabulary(BaseModel):
+    """离线（不调用模型）抽取用的章节词汇表。
+
+    与 core.contracts.ExtractionVocabulary 同构，但不能直接复用它：那个是
+    frozen slots dataclass，不是 Pydantic 模型，当不了请求字段。
+    """
+
+    subject_type: str
+    # 章节标题 -> [实体类型, 关系类型]。
+    sections: dict[str, list[str]] = Field(default_factory=dict)
+    separator: str = "、"
+
+
+class WorkspaceCustomTypes(BaseModel):
+    """这个知识库要覆盖的抽取类型。
+
+    三个字段各自独立：留 null 的项沿用适配器内置清单，因此可以只覆盖其中
+    一项。整体不传与三个字段全 null 等价。
+    """
+
+    entity_types: list[str] | None = None
+    relation_types: list[str] | None = None
+    vocabulary: WorkspaceVocabulary | None = None
+
+
 class WorkspaceCreateRequest(BaseModel):
     name: str
     # 必填：适配器决定这个 Workspace 按哪个领域组织知识。给一个「恰好是
     # 医疗」的默认值会让调用方以为这项选择是可选的，因此不给默认值。
     adapter_id: str
+    # 可选覆盖。适配器注册表本身依然不可变，这里改的只是这一个知识库。
+    custom_types: WorkspaceCustomTypes | None = None
 
 
 class FeedbackRequest(BaseModel):
@@ -559,7 +587,7 @@ def create_app(
         return known_adapters.describe()
 
     @application.post("/workspaces")
-    def create_workspace(request: WorkspaceCreateRequest) -> dict[str, str]:
+    def create_workspace(request: WorkspaceCreateRequest) -> dict[str, object]:
         name = request.name.strip()
         if not name:
             raise ApiError(400, "invalid_request", "name 不能为空。")
@@ -569,14 +597,21 @@ def create_app(
         try:
             # 建库时就解析一次：注册表里没有的 ID 不允许被写进 Workspace，
             # 否则查询时会卡在一个永远解析不出来的归属上。
-            known_adapters.resolve(adapter_id)
+            adapter = known_adapters.resolve(adapter_id)
         except UnknownAdapterError as error:
             raise ApiError(400, "invalid_adapter", str(error)) from error
+        # 词汇表要对着适配器的内置清单校验，因此必须排在上面这次解析之后。
+        custom_entity_types, custom_relation_types, custom_vocabulary = (
+            _parse_custom_types(request.custom_types, adapter)
+        )
         workspace = Workspace(
             id=f"ws-{uuid.uuid4().hex}",
             name=name,
             adapter_id=adapter_id,
             created_at=datetime.now(UTC).isoformat(),
+            custom_entity_types=custom_entity_types,
+            custom_relation_types=custom_relation_types,
+            custom_vocabulary=custom_vocabulary,
         )
         document_repository.save_workspace(workspace)
         return _workspace_response(workspace)
@@ -591,7 +626,7 @@ def create_app(
         }
 
     @application.get("/workspaces/{workspace_id}")
-    def get_workspace(workspace_id: str) -> dict[str, str]:
+    def get_workspace(workspace_id: str) -> dict[str, object]:
         workspace = document_repository.get_workspace(workspace_id)
         if workspace is None:
             raise ApiError(404, "not_found", f"未找到 Workspace：{workspace_id}")
@@ -1138,6 +1173,105 @@ def _document_summary(
     }
 
 
+# 单个类型名的长度上限：类型名要进提示词，过长会挤占正文。
+_MAX_TYPE_NAME_LENGTH = 60
+
+
+def _clean_type_names(names: list[str] | None, field: str) -> tuple[str, ...] | None:
+    """去空白、去重，并把空清单拦在写入之前。"""
+    if names is None:
+        return None
+    cleaned: list[str] = []
+    for name in names:
+        value = name.strip()
+        if not value:
+            continue
+        if len(value) > _MAX_TYPE_NAME_LENGTH:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"{field} 里的类型名超过 {_MAX_TYPE_NAME_LENGTH} 个字符：{value[:20]}…",
+            )
+        if value not in cleaned:
+            cleaned.append(value)
+    if not cleaned:
+        # 空清单的含义是「一个类型都不允许」，不是「不自定义」。放它过去，这个
+        # 知识库会安静地抽不出任何候选。
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"{field} 不能是空清单；不自定义请传 null 或整个不传。",
+        )
+    return tuple(cleaned)
+
+
+def _parse_custom_types(
+    custom: WorkspaceCustomTypes | None, adapter: DomainAdapter
+) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None, ExtractionVocabulary | None]:
+    """校验并归一化建库请求里的自定义类型。
+
+    这是词汇表与类型清单**唯一一次**一致性校验。抽取侧对越界类型是静默丢弃
+    （extraction/service.py 的 _build_candidates），一个拼错的类型不会报错，
+    只会安静地产出 0 条候选。绕过接口直接 save_workspace 的调用方（测试脚本、
+    迁移）不受这里的保护。
+    """
+    if custom is None:
+        return None, None, None
+    entity_types = _clean_type_names(custom.entity_types, "entity_types")
+    relation_types = _clean_type_names(custom.relation_types, "relation_types")
+    if custom.vocabulary is None:
+        return entity_types, relation_types, None
+
+    # 词汇表要对着**最终生效**的清单校验：没覆盖就用适配器内置的。
+    allowed_entities = set(entity_types or adapter.entity_types())
+    allowed_relations = set(relation_types or adapter.relation_types())
+    vocabulary = custom.vocabulary
+    subject_type = vocabulary.subject_type.strip()
+    if subject_type not in allowed_entities:
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"词汇表的 subject_type「{subject_type}」不在生效的实体类型清单里。",
+        )
+    sections: dict[str, tuple[str, str]] = {}
+    for title, pair in vocabulary.sections.items():
+        if not title.strip():
+            raise ApiError(400, "invalid_request", "词汇表里的章节标题不能为空。")
+        if len(pair) != 2:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"词汇表章节「{title}」需要恰好两个类型（实体类型、关系类型）。",
+            )
+        entity_type, relation_type = (item.strip() for item in pair)
+        if entity_type not in allowed_entities:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"词汇表章节「{title}」的实体类型「{entity_type}」不在生效的实体类型清单里。",
+            )
+        if relation_type not in allowed_relations:
+            raise ApiError(
+                400,
+                "invalid_request",
+                f"词汇表章节「{title}」的关系类型「{relation_type}」不在生效的关系类型清单里。",
+            )
+        sections[title.strip()] = (entity_type, relation_type)
+    try:
+        # ExtractionVocabulary 自己还会校验 subject_type 与 separator 非空。
+        return (
+            entity_types,
+            relation_types,
+            ExtractionVocabulary(
+                subject_type=subject_type,
+                sections=sections,
+                separator=vocabulary.separator,
+            ),
+        )
+    except ValueError as error:
+        raise ApiError(400, "invalid_request", str(error)) from error
+
+
 def _require_workspace(
     repository: DocumentRepository, workspace_id: str
 ) -> Workspace:
@@ -1497,12 +1631,52 @@ def _entity_response(entity: Entity) -> dict[str, str]:
     return {"id": entity.id, "name": entity.name, "type": entity.type}
 
 
-def _workspace_response(workspace: Workspace) -> dict[str, str]:
+def _workspace_response(workspace: Workspace) -> dict[str, object]:
+    """Workspace 的对外表示。
+
+    custom_types 回显自定义的覆盖值：前端要靠它算「这个知识库真正生效的类型」，
+    不能拿 /adapters 的内置清单去填审核界面的类型下拉 —— 那会推荐一批服务端
+    即将拒绝的类型。null 表示该项沿用适配器内置。
+    """
     return {
         "id": workspace.id,
         "name": workspace.name,
         "adapter_id": workspace.adapter_id,
         "created_at": workspace.created_at,
+        "custom_types": _custom_types_response(workspace),
+    }
+
+
+def _custom_types_response(workspace: Workspace) -> dict[str, object] | None:
+    if (
+        workspace.custom_entity_types is None
+        and workspace.custom_relation_types is None
+        and workspace.custom_vocabulary is None
+    ):
+        return None
+    vocabulary = workspace.custom_vocabulary
+    return {
+        "entity_types": (
+            None
+            if workspace.custom_entity_types is None
+            else list(workspace.custom_entity_types)
+        ),
+        "relation_types": (
+            None
+            if workspace.custom_relation_types is None
+            else list(workspace.custom_relation_types)
+        ),
+        "vocabulary": (
+            None
+            if vocabulary is None
+            else {
+                "subject_type": vocabulary.subject_type,
+                "sections": {
+                    title: list(pair) for title, pair in vocabulary.sections.items()
+                },
+                "separator": vocabulary.separator,
+            }
+        ),
     }
 
 

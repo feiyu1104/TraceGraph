@@ -17,6 +17,7 @@ const API_PREFIXES = [
   '/ingestion-jobs',
   '/documents',
   '/models',
+  '/model-connections',
   '/adapters',
   '/workspaces',
   '/extractions',

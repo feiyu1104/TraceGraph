@@ -1,3 +1,5 @@
+import { useState } from 'react'
+
 import type { ApiRequestError } from '../api/client'
 import type { ExtractionRun, ExtractionStatus, ModelInfo, WorkspaceDocument } from '../api/types'
 import EmptyState from './EmptyState'
@@ -70,9 +72,14 @@ export default function ExtractionPanel({
   onOpenRun,
   onReloadRuns,
 }: ExtractionPanelProps) {
+  const [showFailedRuns, setShowFailedRuns] = useState(false)
   const current = models.find((model) => model.id === modelId)
   const polling =
     activeRun !== null && (activeRun.status === 'pending' || activeRun.status === 'running')
+  const failedRunCount = runs?.filter((run) => run.status === 'failed').length ?? 0
+  const visibleRuns = showFailedRuns
+    ? runs
+    : runs?.filter((run) => run.status !== 'failed')
 
   return (
     <div className="extraction">
@@ -90,7 +97,7 @@ export default function ExtractionPanel({
         <div>
           <dt>文档版本</dt>
           <dd title={document.latest_version_id ?? ''}>
-            {document.latest_version_id ? shortId(document.latest_version_id) : '—'}
+            {document.latest_version_id ? shortId(document.latest_version_id) : '暂无'}
           </dd>
         </div>
         <div>
@@ -116,7 +123,7 @@ export default function ExtractionPanel({
               {models.map((model) => (
                 <option key={model.id} value={model.id} disabled={!model.available}>
                   {model.model ? `${model.label}（${model.model}）` : model.label}
-                  {model.available ? '' : ` — 不可用：${model.reason}`}
+                  {model.available ? '' : `（不可用：${model.reason}）`}
                 </option>
               ))}
             </select>
@@ -179,7 +186,18 @@ export default function ExtractionPanel({
       )}
 
       <div className="extraction__history">
-        <h4 className="extraction__history-title">抽取任务历史</h4>
+        <div className="extraction__history-head">
+          <h4 className="extraction__history-title">抽取任务历史</h4>
+          {failedRunCount > 0 && (
+            <button
+              type="button"
+              className="button button--ghost"
+              onClick={() => setShowFailedRuns((shown) => !shown)}
+            >
+              {showFailedRuns ? '收起失败记录' : `显示失败记录（${failedRunCount}）`}
+            </button>
+          )}
+        </div>
         {runsError && <ErrorState error={runsError} onRetry={onReloadRuns} />}
         {runsLoading && runs === null && <p className="meta">正在读取抽取任务…</p>}
         {runs !== null && runs.length === 0 && !runsError && (
@@ -188,9 +206,12 @@ export default function ExtractionPanel({
             hint="选好模型后点击「开始抽取」，任务与候选都会保留在这里。"
           />
         )}
-        {runs !== null && runs.length > 0 && (
+        {visibleRuns !== null && visibleRuns !== undefined && visibleRuns.length === 0 && failedRunCount > 0 && (
+          <p className="meta">目前只有失败记录；它们仅用于排查问题，不会产生候选。</p>
+        )}
+        {visibleRuns !== null && visibleRuns !== undefined && visibleRuns.length > 0 && (
           <ul className="runs">
-            {runs.map((run) => (
+            {visibleRuns.map((run) => (
               <li key={run.id} className="runs__item">
                 <span className={`badge ${RUN_STATUS_CLASS[run.status]}`}>
                   {runStatusText(run.status)}
@@ -202,13 +223,15 @@ export default function ExtractionPanel({
                   {run.model_id} · 实体 {run.entity_count} · 关系 {run.relation_count}
                 </span>
                 <span className="meta">{run.created_at}</span>
-                <button
-                  type="button"
-                  className="button button--ghost"
-                  onClick={() => onOpenRun(run.id)}
-                >
-                  查看候选
-                </button>
+                {run.status === 'succeeded' && (
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => onOpenRun(run.id)}
+                  >
+                    查看候选
+                  </button>
+                )}
                 {run.error && <span className="runs__error">{run.error}</span>}
               </li>
             ))}

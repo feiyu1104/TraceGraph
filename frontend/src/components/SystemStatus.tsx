@@ -1,9 +1,10 @@
-import type { SystemInfo } from '../api/types'
-
 interface SystemStatusProps {
-  system: SystemInfo | null
   systemError: string | null
   healthy: boolean | null
+  modelLabel: string
+  modelAvailable: boolean
+  modelKind: string
+  modelLink: 'checking' | 'ready' | 'failed'
 }
 
 type Tone = 'default' | 'accent' | 'warn' | 'danger'
@@ -15,69 +16,34 @@ interface Chip {
   tone: Tone
 }
 
-function graphBackendName(value: string): string {
-  if (value === 'neo4j') return 'Neo4j'
-  if (value === 'sqlite') return 'SQLite'
-  return value
-}
-
 export default function SystemStatus({
-  system,
   systemError,
   healthy,
+  modelLabel,
+  modelAvailable,
+  modelKind,
+  modelLink,
 }: SystemStatusProps) {
-  if (systemError) {
-    return (
-      <div className="status-bar">
-        <span className="chip chip--danger">
-          <span className="chip__label">系统状态</span>不可用
-        </span>
-        <span className="status-bar__detail">{systemError}</span>
-      </div>
-    )
-  }
-
-  if (!system) {
-    return (
-      <div className="status-bar">
-        <span className="chip">
-          <span className="chip__label">系统状态</span>读取中…
-        </span>
-      </div>
-    )
-  }
-
-  const graphDegraded = system.graph_degraded === 'true'
-  const usesLlm = system.llm_configured === 'true'
-
+  const connection = connectionStatus(
+    healthy,
+    modelAvailable,
+    modelKind,
+    modelLink,
+  )
   const chips: Chip[] = [
     {
-      key: 'graph',
-      label: '图后端',
-      value: graphBackendName(system.graph_backend),
-      tone: graphDegraded ? 'warn' : 'accent',
+      key: 'model',
+      label: '当前模型',
+      value: modelLabel,
+      tone: modelAvailable ? 'accent' : 'danger',
     },
     {
-      key: 'generator',
-      label: '生成器',
-      value: usesLlm ? '大模型' : '离线摘录',
-      tone: usesLlm ? 'accent' : 'default',
+      key: 'connection',
+      label: '连接',
+      value: connection.value,
+      tone: connection.tone,
     },
   ]
-  if (usesLlm) {
-    chips.push({
-      key: 'model',
-      label: '模型',
-      value: system.llm_model || '未命名',
-      tone: 'default',
-    })
-  }
-  chips.push({
-    key: 'health',
-    label: '健康',
-    value: healthy === null ? '检查中' : healthy ? '正常' : '异常',
-    tone: healthy === false ? 'danger' : 'default',
-  })
 
   return (
     <div className="status-bar">
@@ -89,13 +55,26 @@ export default function SystemStatus({
           </li>
         ))}
       </ul>
-      {graphDegraded && (
-        <p className="status-bar__detail status-bar__detail--warn" role="status">
-          图后端已降级：请求 {graphBackendName(system.graph_requested ?? '')}，
-          实际使用 {graphBackendName(system.graph_backend)}。
-          {system.graph_detail ? ` 原因：${system.graph_detail}` : ''}
+      {systemError && (
+        <p className="status-bar__detail status-bar__detail--danger" role="status">
+          {systemError}
         </p>
       )}
     </div>
   )
+}
+
+function connectionStatus(
+  healthy: boolean | null,
+  modelAvailable: boolean,
+  modelKind: string,
+  modelLink: 'checking' | 'ready' | 'failed',
+): { value: string; tone: Tone } {
+  if (healthy === false) return { value: '服务断开', tone: 'danger' }
+  if (healthy === null) return { value: '检查中', tone: 'default' }
+  if (!modelAvailable) return { value: '模型不可用', tone: 'danger' }
+  if (modelKind === 'extractive') return { value: '本地可用', tone: 'default' }
+  if (modelLink === 'ready') return { value: '连接正常', tone: 'accent' }
+  if (modelLink === 'failed') return { value: '模型异常', tone: 'danger' }
+  return { value: '等待验证', tone: 'default' }
 }

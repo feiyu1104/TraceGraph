@@ -10,12 +10,17 @@ import type {
   ExtractionRun,
   ExtractionRunsResponse,
   IngestionResult,
+  ModelConnection,
+  ModelConnectionInput,
+  ModelConnectionsResponse,
+  ModelDiscoveryResponse,
   ModelsResponse,
   PublicationResult,
   RelationEvidence,
   RunCandidatesResponse,
   SystemInfo,
   WorkspaceCandidatesResponse,
+  WorkspaceCustomTypes,
   WorkspaceDocumentsResponse,
   WorkspaceInfo,
   WorkspacesResponse,
@@ -85,6 +90,14 @@ function patchJson(body: unknown): RequestInit {
   }
 }
 
+function putJson(body: unknown): RequestInit {
+  return {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }
+}
+
 export function fetchSystem(): Promise<SystemInfo> {
   return request<SystemInfo>('/system')
 }
@@ -122,6 +135,51 @@ export function fetchModels(): Promise<ModelsResponse> {
   return request<ModelsResponse>('/models')
 }
 
+export function fetchModelConnections(): Promise<ModelConnectionsResponse> {
+  return request<ModelConnectionsResponse>('/model-connections')
+}
+
+export function discoverModels(
+  baseUrl: string,
+  apiKey: string,
+  timeout: number,
+): Promise<ModelDiscoveryResponse> {
+  return request<ModelDiscoveryResponse>(
+    '/model-connections/discover',
+    postJson({ base_url: baseUrl, api_key: apiKey, timeout }),
+  )
+}
+
+export function discoverConnectionModels(connectionId: string): Promise<ModelDiscoveryResponse> {
+  return request<ModelDiscoveryResponse>(
+    `/model-connections/${encodeURIComponent(connectionId)}/discover`,
+    postJson({}),
+  )
+}
+
+export function saveModelConnection(
+  connectionId: string,
+  input: ModelConnectionInput,
+): Promise<ModelConnection> {
+  return request<ModelConnection>(
+    `/model-connections/${encodeURIComponent(connectionId)}`,
+    putJson(input),
+  )
+}
+
+export function deleteModelConnection(
+  connectionId: string,
+): Promise<{ id: string; default: string }> {
+  return request<{ id: string; default: string }>(
+    `/model-connections/${encodeURIComponent(connectionId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function setDefaultModel(modelId: string): Promise<ModelsResponse> {
+  return request<ModelsResponse>('/models/default', putJson({ model_id: modelId }))
+}
+
 export function fetchWorkspaces(): Promise<WorkspacesResponse> {
   return request<WorkspacesResponse>('/workspaces')
 }
@@ -130,15 +188,20 @@ export function fetchAdapters(): Promise<AdaptersResponse> {
   return request<AdaptersResponse>('/adapters')
 }
 
-/** 建库只提交名称与内置适配器 ID；适配器清单由服务端决定。 */
+/**
+ * 建库提交名称、内置适配器 ID，以及可选的自定义抽取类型。
+ *
+ * customTypes 里为 null 的项表示沿用适配器内置清单；整个不传同理。类型清单
+ * 由服务端决定，前端只能覆盖这一个知识库要用的那一份。
+ */
 export function createWorkspace(
   name: string,
   adapterId: string,
+  customTypes?: WorkspaceCustomTypes,
 ): Promise<WorkspaceInfo> {
-  return request<WorkspaceInfo>(
-    '/workspaces',
-    postJson({ name, adapter_id: adapterId }),
-  )
+  const body: Record<string, unknown> = { name, adapter_id: adapterId }
+  if (customTypes) body.custom_types = customTypes
+  return request<WorkspaceInfo>('/workspaces', postJson(body))
 }
 
 function readAsBase64(file: File): Promise<string> {

@@ -67,13 +67,13 @@
 }
 
 .chip--accent {
-  border-color: color-mix(in srgb, var(--green-600) 26%, transparent);
-  background: var(--green-050);
-  color: var(--green-800);
+  border-color: color-mix(in srgb, var(--accent-600) 26%, transparent);
+  background: var(--accent-050);
+  color: var(--accent-800);
 }
 
 .chip--accent .chip__label {
-  color: color-mix(in srgb, var(--green-700) 70%, transparent);
+  color: color-mix(in srgb, var(--accent-700) 70%, transparent);
 }
 
 .chip--warn {
@@ -107,6 +107,10 @@
   color: var(--amber-800);
 }
 
+.status-bar__detail--danger {
+  color: var(--danger-700);
+}
+
 /* ---------- 知识库选择 ---------- */
 /* 单独一条横条：它同时管查询与上传，放在任何一栏里都会让归属看起来只覆盖半页。 */
 
@@ -127,7 +131,7 @@
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--line);
-  border-left: 3px solid var(--green-600);
+  border-left: 3px solid var(--accent-600);
   border-radius: var(--radius-md);
   background: var(--surface);
   box-shadow: var(--shadow-sm);
@@ -157,7 +161,7 @@
 }
 
 .workspace-bar__notice--ok {
-  color: var(--green-700);
+  color: var(--accent-700);
 }
 
 .workspace-create {
@@ -190,11 +194,80 @@
   gap: var(--space-2);
 }
 
+/* ---------- 建库表单里的「自定义抽取类型」折叠区 ---------- */
+
+.workspace-create__advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--line);
+}
+
+/* 折叠开关长得像一行小标题，而不是按钮：它是可选的次要入口。 */
+.workspace-create__toggle {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ink-600);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.workspace-create__toggle:hover:not(:disabled) {
+  color: var(--accent-700);
+}
+
+.workspace-create__toggle:disabled {
+  color: var(--ink-300);
+  cursor: not-allowed;
+}
+
+.workspace-create__toggle span {
+  display: inline-block;
+  width: 1em;
+}
+
+.workspace-create__vocab {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.workspace-create__vocab-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.workspace-create__vocab-head .field--narrow {
+  max-width: 8rem;
+}
+
+/* 一行「章节标题 / 实体类型 / 关系类型 / 删除」。窄屏下换行，不横向滚动。 */
+.workspace-create__vocab-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.workspace-create__vocab-row .field__input {
+  flex: 1 1 10rem;
+  min-width: 0;
+  max-width: none;
+}
+
 /* ---------- 主栅格：桌面双栏，窄屏单栏 ---------- */
 
 .app__grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-5);
   align-items: start;
   max-width: 1280px;
@@ -247,8 +320,8 @@
 }
 
 .hops__option--active {
-  border-color: var(--green-600);
-  background: var(--green-050);
+  border-color: var(--accent-600);
+  background: var(--accent-050);
 }
 
 .hops__option input {
@@ -335,8 +408,8 @@
 
 .examples__item:hover:not(:disabled) {
   border-style: solid;
-  border-color: var(--green-600);
-  color: var(--green-700);
+  border-color: var(--accent-600);
+  color: var(--accent-700);
 }
 
 .disclaimer {
@@ -359,8 +432,20 @@
 .answer__text {
   max-width: var(--measure);
   color: var(--ink-900);
+  font-size: 1.05rem;
+  line-height: 1.95;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.answer__text--cited {
+  max-width: 72ch;
+  padding: var(--space-3) 0 var(--space-3) var(--space-4);
+  border-left: 3px solid var(--accent-600);
+}
+
+.answer__sentence + .answer__sentence {
+  margin-left: 0.35em;
 }
 
 .answer__pending {
@@ -377,42 +462,12 @@
   font-size: var(--text-base);
 }
 
-.claims {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-
-.claims__item {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding-left: var(--space-4);
-  border-left: 2px solid var(--green-100);
-}
-
-.claims--derived .claims__item {
-  border-left-color: var(--amber-100);
-}
-
-.claims__text {
-  flex: 1;
-  min-width: 0;
-  max-width: var(--measure);
-}
-
-.claims__citations {
-  display: flex;
-  flex-shrink: 0;
-  gap: 2px;
-}
-
 .citation {
   padding: 0 3px;
   border: 0;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--green-600);
+  color: var(--accent-600);
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 700;
@@ -420,7 +475,7 @@
 }
 
 .citation:hover {
-  background: var(--green-050);
+  background: var(--accent-050);
   text-decoration: underline;
 }
 
@@ -449,6 +504,22 @@
   max-width: var(--measure);
   color: var(--ink-500);
   font-size: var(--text-sm);
+}
+
+.derived__paths {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.derived__paths .gpath {
+  margin-top: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid color-mix(in srgb, var(--amber-600) 22%, transparent);
+}
+
+.derived__paths .gpath:first-child {
+  padding-top: 0;
+  border-top: 0;
 }
 
 .warnings {
@@ -503,7 +574,7 @@
 }
 
 .drawer__toggle:hover .drawer__title {
-  color: var(--green-700);
+  color: var(--accent-700);
   text-decoration: underline;
 }
 
@@ -515,7 +586,7 @@
 
 .drawer__chevron {
   margin-left: auto;
-  color: var(--green-600);
+  color: var(--accent-600);
   font-size: var(--text-sm);
   font-weight: 600;
 }
@@ -535,7 +606,7 @@
 }
 
 .evidences__item--highlight {
-  background: var(--green-050);
+  background: var(--accent-050);
 }
 
 .evidences__head {
@@ -559,6 +630,28 @@
   font-size: var(--text-sm);
 }
 
+.evidences__source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  color: var(--ink-500);
+  font-size: var(--text-xs);
+}
+
+.evidences__source div {
+  display: flex;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.evidences__source dt {
+  color: var(--ink-400);
+}
+
+.evidences__source dd {
+  overflow-wrap: anywhere;
+}
+
 /* ---------- 图路径 ---------- */
 
 .gpath {
@@ -576,15 +669,15 @@
 .gpath__node {
   padding: 3px var(--space-3);
   border-radius: var(--radius-sm);
-  background: var(--green-050);
-  color: var(--green-800);
+  background: var(--accent-050);
+  color: var(--accent-800);
   font-size: var(--text-sm);
   font-weight: 600;
 }
 
 .gpath__node--start {
-  background: var(--green-700);
-  color: #fff;
+  background: var(--accent-solid);
+  color: var(--on-accent);
 }
 
 .gpath__edge {
@@ -607,8 +700,8 @@
 
 .gpath__edge[aria-expanded="true"] {
   border-color: var(--amber-700);
-  background: var(--amber-600);
-  color: #fff;
+  background: var(--amber-solid);
+  color: var(--on-accent);
 }
 
 .gpath__edge-label {
@@ -693,8 +786,8 @@
 }
 
 .entities__item:hover:not(:disabled) {
-  border-color: var(--green-500);
-  background: var(--green-050);
+  border-color: var(--accent-500);
+  background: var(--accent-050);
 }
 
 .entities__name {
@@ -744,11 +837,11 @@
 }
 
 .relations__row:hover {
-  background: var(--green-050);
+  background: var(--accent-050);
 }
 
 .relations__arrow {
-  color: var(--green-600);
+  color: var(--accent-600);
   font-weight: 700;
 }
 
@@ -778,11 +871,6 @@
   gap: var(--space-3);
 }
 
-.field__input--file {
-  padding: var(--space-2);
-  font-size: var(--text-sm);
-}
-
 .importer__target {
   color: var(--ink-700);
   font-size: var(--text-sm);
@@ -799,16 +887,6 @@
   line-height: 1.7;
 }
 
-.importer__file {
-  color: var(--ink-700);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
-}
-
-.importer__file strong {
-  color: var(--ink-900);
-}
-
 .importer__error {
   padding: var(--space-3);
   border-left: 3px solid var(--danger-600);
@@ -818,27 +896,18 @@
   font-size: var(--text-sm);
 }
 
-.importer__actions {
-  display: flex;
-  gap: var(--space-2);
-}
-
 .importer__result {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
   padding: var(--space-4);
-  border-left: 3px solid var(--green-600);
+  border-left: 3px solid var(--accent-600);
   border-radius: var(--radius-sm);
-  background: var(--green-050);
-}
-
-.importer__result .metrics {
-  border-top-color: color-mix(in srgb, var(--green-700) 20%, transparent);
+  background: var(--accent-050);
 }
 
 .importer__status {
-  color: var(--green-800);
+  color: var(--accent-800);
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
@@ -877,7 +946,6 @@
 
 @media (max-width: 960px) {
   .app__grid {
-    grid-template-columns: minmax(0, 1fr);
     padding: var(--space-4) var(--space-4) var(--space-6);
   }
 

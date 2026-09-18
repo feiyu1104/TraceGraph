@@ -15,7 +15,7 @@ interface ModelSelectorProps {
 
 function optionLabel(model: ModelInfo): string {
   const name = model.model ? `${model.label}（${model.model}）` : model.label
-  return model.available ? name : `${name} — 不可用：${model.reason}`
+  return model.available ? name : `${name}（不可用：${model.reason}）`
 }
 
 export default function ModelSelector({

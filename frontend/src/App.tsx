@@ -9,12 +9,14 @@ import {
   fetchSystem,
   fetchWorkspaces,
 } from './api/client'
+import { effectiveTypes } from './api/types'
 import type { AdapterInfo, Answer, ModelInfo, SystemInfo, WorkspaceInfo } from './api/types'
 import AnswerPanel from './components/AnswerPanel'
 import DocumentsWorkbench from './components/DocumentsWorkbench'
 import GraphExplorer from './components/GraphExplorer'
 import Header from './components/Header'
 import ModelSelector from './components/ModelSelector'
+import ModelSettings from './components/ModelSettings'
 import QuestionForm from './components/QuestionForm'
 import TabBar, { type TabKey } from './components/TabBar'
 import WorkspaceBar from './components/WorkspaceBar'
@@ -36,6 +38,7 @@ const FALLBACK_WORKSPACE: WorkspaceInfo = {
   name: 'ws-default',
   adapter_id: 'medical',
   created_at: '',
+  custom_types: null,
 }
 
 const RETRIEVER_LABELS: Record<string, string> = {
@@ -54,6 +57,7 @@ export default function App() {
   const [defaultModelId, setDefaultModelId] = useState(OFFLINE_MODEL.id)
   const [modelNotice, setModelNotice] = useState<string | null>(null)
   const [generatorId, setGeneratorId] = useState(OFFLINE_MODEL.id)
+  const [modelLink, setModelLink] = useState<'checking' | 'ready' | 'failed'>('checking')
 
   const [workspaces, setWorkspaces] = useState<WorkspaceInfo[]>([FALLBACK_WORKSPACE])
   const [workspacesNotice, setWorkspacesNotice] = useState<string | null>(null)
@@ -64,6 +68,7 @@ export default function App() {
   // 文档与知识工作台里任何一次上传 / 抽取 / 审核 / 发布进行中；与问答的 busy
   // 一样，用来在写入期间锁住知识库切换。
   const [workbenchBusy, setWorkbenchBusy] = useState(false)
+  const [modelSettingsBusy, setModelSettingsBusy] = useState(false)
   // 发布成功后 +1，图谱浏览按它重新挂载并重新加载当前知识库的图。
   const [graphRevision, setGraphRevision] = useState(0)
 
@@ -170,8 +175,8 @@ export default function App() {
   // 查询。用 ref 取最新值，判断的才是「创建成功的这一刻」在不在忙。
   const requestBusyRef = useRef(false)
   useEffect(() => {
-    requestBusyRef.current = busy || workbenchBusy
-  }, [busy, workbenchBusy])
+    requestBusyRef.current = busy || workbenchBusy || modelSettingsBusy
+  }, [busy, modelSettingsBusy, workbenchBusy])
 
   const handleCreated = useCallback(
     (workspace: WorkspaceInfo): boolean => {
@@ -197,8 +202,24 @@ export default function App() {
     setBusy(true)
     try {
       // workspace_id 每次显式带上：不依赖服务端默认值，也不放进任何全局状态。
-      setAnswer(await askQuestion(trimmed, workspaceId, effectiveMaxHops, generatorId))
+      const result = await askQuestion(trimmed, workspaceId, effectiveMaxHops, generatorId)
+      setAnswer(result)
+      setDrawerOpen(result.evidences.length > 0)
+      const selectedModel = models.find((model) => model.id === generatorId)
+      if (selectedModel?.kind !== 'extractive' && result.metrics.generator) {
+        setModelLink(
+          result.status === 'system_error' || result.metrics.generation_degraded
+            ? 'failed'
+            : 'ready',
+        )
+      }
     } catch (error) {
+      if (
+        error instanceof ApiRequestError &&
+        error.errorCode === 'generator_unavailable'
+      ) {
+        setModelLink('failed')
+      }
       setQueryError(
         error instanceof ApiRequestError
           ? error
@@ -207,7 +228,7 @@ export default function App() {
     } finally {
       setBusy(false)
     }
-  }, [effectiveMaxHops, generatorId, question, workspaceId])
+  }, [effectiveMaxHops, generatorId, models, question, workspaceId])
 
   const selectEvidence = useCallback((evidenceId: string) => {
     setDrawerOpen(true)
@@ -228,99 +249,144 @@ export default function App() {
   const usedGeneratorId = answer?.metrics.generator
   const generatorLabel = usedGeneratorId
     ? (models.find((model) => model.id === usedGeneratorId)?.label ?? usedGeneratorId)
-    : '—'
+    : '未使用'
 
   // 同样取回答里带回来的事实，而不是当前选择器里的值：用户必须能看到
   // 「这次回答到底是谁产出的」。
   const usedWorkspaceId = answer?.metrics.workspace_id
   const usedWorkspaceLabel = usedWorkspaceId
     ? (workspaces.find((workspace) => workspace.id === usedWorkspaceId)?.name ?? usedWorkspaceId)
-    : '—'
+    : '未使用'
   const usedAdapterId = answer?.metrics.adapter_id
   const usedAdapterLabel = usedAdapterId
     ? (adapters.find((adapter) => adapter.id === usedAdapterId)?.label ?? usedAdapterId)
-    : '—'
+    : '未使用'
   const usedRetriever = answer?.metrics.retriever
   const usedRetrieverLabel = usedRetriever
     ? (RETRIEVER_LABELS[usedRetriever] ?? usedRetriever)
-    : '—'
+    : '未使用'
 
   const currentWorkspaceName = currentWorkspace?.name ?? workspaceId
   // 适配器的类型清单只有一个来源：服务端 /adapters。前端不另立一份业务规则。
   const currentAdapter =
     adapters.find((adapter) => adapter.id === currentWorkspace?.adapter_id) ?? null
-  const currentAdapterLabel = currentAdapter?.label ?? currentWorkspace?.adapter_id ?? '—'
+  const currentAdapterLabel = currentAdapter?.label ?? currentWorkspace?.adapter_id ?? '未知'
+  // 审核界面的类型下拉必须用这个知识库真正生效的类型，而不是适配器目录里的
+  // 内置清单：自定义类型的库里，内置清单的类型服务端会拒绝，用户选得到却提交
+  // 不了。自定义那一侧由服务端在建库时回显。
+  const effectiveEntityTypes = effectiveTypes(currentWorkspace, currentAdapter, 'entity_types')
+  const effectiveRelationTypes = effectiveTypes(
+    currentWorkspace,
+    currentAdapter,
+    'relation_types',
+  )
 
   const handleGraphChanged = useCallback(() => setGraphRevision((current) => current + 1), [])
+  const handleModelsChanged = useCallback((listing: { default: string; models: ModelInfo[] }) => {
+    setModels(listing.models)
+    setDefaultModelId(listing.default)
+    setGeneratorId((current) => {
+      const next = listing.models.some((model) => model.id === current && model.available)
+        ? current
+        : listing.default
+      const model = listing.models.find((item) => item.id === next)
+      setModelLink(model?.kind === 'extractive' ? 'ready' : 'checking')
+      return next
+    })
+    setModelNotice(null)
+    fetchSystem().then(setSystem).catch(() => undefined)
+  }, [])
+
+  const navigationBusy = busy || workbenchBusy || modelSettingsBusy
+  const currentModel =
+    models.find((model) => model.id === generatorId) ?? OFFLINE_MODEL
+
+  function selectGenerator(modelId: string) {
+    setGeneratorId(modelId)
+    const model = models.find((item) => item.id === modelId)
+    setModelLink(model?.kind === 'extractive' ? 'ready' : 'checking')
+  }
 
   return (
     <div className="app">
-      <Header system={system} systemError={systemError} healthy={healthy} />
-
-      <WorkspaceBar
-        workspaces={workspaces}
-        selectedId={workspaceId}
-        onSelect={selectWorkspace}
-        adapters={adapters}
-        adaptersError={adaptersError}
-        listNotice={workspacesNotice}
-        supportsGraph={supportsGraph}
-        disabled={busy || workbenchBusy}
-        onCreated={handleCreated}
+      <Header
+        systemError={systemError}
+        healthy={healthy}
+        modelLabel={currentModel.model || currentModel.label}
+        modelAvailable={currentModel.available}
+        modelKind={currentModel.kind}
+        modelLink={modelLink}
       />
 
+      {tab !== 'models' && (
+        <WorkspaceBar
+          workspaces={workspaces}
+          selectedId={workspaceId}
+          onSelect={selectWorkspace}
+          adapters={adapters}
+          adaptersError={adaptersError}
+          listNotice={workspacesNotice}
+          supportsGraph={supportsGraph}
+          disabled={navigationBusy}
+          onCreated={handleCreated}
+        />
+      )}
+
       {/* 与知识库选择器同一把锁：写入期间切页会卸载工作台，等于把请求丢在半路。 */}
-      <TabBar active={tab} onChange={setTab} disabled={busy || workbenchBusy} />
+      <TabBar active={tab} onChange={setTab} disabled={navigationBusy} />
 
-      <main className={`app__grid${tab === 'qa' ? '' : ' app__grid--single'}`}>
+      <main className="app__grid">
         {tab === 'qa' && (
-          <section className="app__column app__column--main" aria-label="知识问答">
-            <div className="panel">
-              <h2 className="panel__title">知识问答</h2>
-              <QuestionForm
-                question={question}
-                onQuestionChange={setQuestion}
-                maxHops={maxHops}
-                onMaxHopsChange={setMaxHops}
-                onSubmit={() => void runQuery()}
-                onClear={clearAll}
-                busy={busy}
-                multiHopEnabled={supportsGraph}
-                retrievalNotice={supportsGraph ? null : KEYWORD_ONLY_NOTICE}
-                adapterId={currentWorkspace?.adapter_id ?? ''}
-                modelSelector={
-                  <ModelSelector
-                    models={models}
-                    selected={generatorId}
-                    defaultId={defaultModelId}
-                    onChange={setGeneratorId}
-                    disabled={busy}
-                    error={modelNotice}
-                  />
-                }
-              />
-            </div>
-
-            <div className="panel">
-              <h2 className="panel__title">回答</h2>
-              <AnswerPanel
-                answer={answer}
-                error={queryError}
-                busy={busy}
-                hasAsked={hasAsked}
-                generatorLabel={generatorLabel}
-                workspaceLabel={usedWorkspaceLabel}
-                workspaceId={usedWorkspaceId ?? workspaceId}
-                adapterLabel={usedAdapterLabel}
-                retrieverLabel={usedRetrieverLabel}
-                drawerOpen={drawerOpen}
-                onToggleDrawer={() => setDrawerOpen((open) => !open)}
-                reveal={reveal}
-                onSelectEvidence={selectEvidence}
-                onRetry={() => void runQuery()}
-              />
-            </div>
-          </section>
+          <>
+            <section className="app__column" aria-label="提出问题">
+              <div className="panel">
+                <h2 className="panel__title">知识问答</h2>
+                <QuestionForm
+                  question={question}
+                  onQuestionChange={setQuestion}
+                  maxHops={maxHops}
+                  onMaxHopsChange={setMaxHops}
+                  onSubmit={() => void runQuery()}
+                  onClear={clearAll}
+                  busy={busy}
+                  multiHopEnabled={supportsGraph}
+                  retrievalNotice={supportsGraph ? null : KEYWORD_ONLY_NOTICE}
+                  adapterId={currentWorkspace?.adapter_id ?? ''}
+                  modelSelector={
+                    <ModelSelector
+                      models={models}
+                      selected={generatorId}
+                      defaultId={defaultModelId}
+                      onChange={selectGenerator}
+                      disabled={busy}
+                      error={modelNotice}
+                    />
+                  }
+                />
+              </div>
+            </section>
+            <section className="app__column" aria-label="回答与证据">
+              <div className="panel">
+                <h2 className="panel__title">回答</h2>
+                <AnswerPanel
+                  answer={answer}
+                  error={queryError}
+                  busy={busy}
+                  hasAsked={hasAsked}
+                  generatorLabel={generatorLabel}
+                  workspaceLabel={usedWorkspaceLabel}
+                  workspaceId={usedWorkspaceId ?? workspaceId}
+                  adapterLabel={usedAdapterLabel}
+                  retrieverLabel={usedRetrieverLabel}
+                  drawerOpen={drawerOpen}
+                  onToggleDrawer={() => setDrawerOpen((open) => !open)}
+                  reveal={reveal}
+                  onSelectEvidence={selectEvidence}
+                  onRetry={() => void runQuery()}
+                />
+              </div>
+            </section>
+          </>
         )}
 
         {tab === 'knowledge' && (
@@ -331,8 +397,8 @@ export default function App() {
             workspaceName={currentWorkspaceName}
             adapterId={currentWorkspace?.adapter_id ?? ''}
             adapterLabel={currentAdapterLabel}
-            entityTypes={currentAdapter?.entity_types ?? []}
-            relationTypes={currentAdapter?.relation_types ?? []}
+            entityTypes={effectiveEntityTypes}
+            relationTypes={effectiveRelationTypes}
             models={models}
             defaultModelId={defaultModelId}
             maxUploadBytes={
@@ -362,12 +428,21 @@ export default function App() {
             </div>
           </section>
         )}
+
+        {tab === 'models' && (
+          <ModelSettings
+            models={models}
+            defaultModelId={defaultModelId}
+            onModelsChanged={handleModelsChanged}
+            onBusyChange={setModelSettingsBusy}
+          />
+        )}
       </main>
 
       <footer className="app-footer">
         <span>
-          TraceGraph {system?.version ?? ''} · 图后端 {system?.graph_backend ?? '—'} · 默认模型{' '}
-          {system?.llm_model || system?.generator || '—'}
+          TraceGraph {system?.version ?? ''} · 图后端 {system?.graph_backend ?? '未知'}，默认模型{' '}
+          {system?.llm_model || system?.generator || '未知'}
         </span>
         <a className="app-footer__link" href="/docs">
           接口文档
