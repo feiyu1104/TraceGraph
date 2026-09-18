@@ -1115,3 +1115,422 @@ def test_concurrent_reads_never_mix_default_id_and_generator() -> None:
         assert generator is expected[model_id]
     assert handle.current in (first, second)
     assert handle.current.resolve_selection(None)[1] is handle.current.default_generator
+
+
+# --------------------------------------------------------------------------
+# 七、并发写的一致性
+# --------------------------------------------------------------------------
+#
+# 并发用例不用「睡一会儿看结果」来碰运气：所有交错都由事件闸门钉死在确定
+# 的一刻 —— 某条事务停在写之前或写之后，另一条再发出，然后放行。这样既没有
+# 依赖时序的等待，也不需要真实网络。
+
+
+class InterleavingStore(ConnectionStore):
+    """可以在写入前后停住的存储，用来构造确定性的并发交错。
+
+    两个位置对应配置事务里两个真实的窗口：
+
+    - `pause_before_write`：已经读完旧配置、还没落盘 —— 修复前，另一个写
+      事务正是在这里读到同一份旧配置，于是后落盘的那份把前一份整条覆盖；
+    - `pause_after_write`：文件已更新、运行时快照还没替换 —— 读接口正是在
+      这里可能把新一代的连接清单和上一代的默认模型拼在一起。
+
+    `overlaps` 是回归探针：上一次写事务还没落盘时，又有一次读写重新加载了
+    配置，就会被记下一笔。加了事务锁的正确实现下它必然始终为空。
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self._guard = threading.Lock()
+        self._writing = False
+        self.overlaps: list[str] = []
+        self.writes: list[tuple[str, ...]] = []
+        self.pause_before_write = False
+        self.pause_after_write = False
+        self.write_started = threading.Event()
+        self.release_write = threading.Event()
+        self.file_written = threading.Event()
+        self.release_replace = threading.Event()
+
+    def load(self) -> ConnectionFile:
+        with self._guard:
+            if self._writing:
+                self.overlaps.append("上一次写还没落盘，这次操作就重新加载了配置")
+        return super().load()
+
+    def save(self, data: ConnectionFile) -> None:
+        with self._guard:
+            pause_before = self.pause_before_write
+            self.pause_before_write = False
+            self._writing = True
+        try:
+            if pause_before:
+                self.write_started.set()
+                # 这里的超时只是兜底：真出问题时要让测试失败，而不是把整套
+                # 用例永久挂住。放行由测试线程负责，正常路径不会等满。
+                assert self.release_write.wait(timeout=10)
+            super().save(data)
+            with self._guard:
+                self.writes.append(tuple(item.id for item in data.connections))
+            if self.pause_after_write:
+                self.pause_after_write = False
+                self.file_written.set()
+                assert self.release_replace.wait(timeout=10)
+        finally:
+            with self._guard:
+                self._writing = False
+
+
+class BlockingDiscoverer(FakeDiscoverer):
+    """会一直卡住的远程发现：用来验证请求远端期间没有攥着事务锁。"""
+
+    def __init__(self) -> None:
+        super().__init__(("alpha", "beta"))
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def __call__(self, base_url: str, api_key: str, timeout: float) -> tuple[str, ...]:
+        self.calls.append((base_url, api_key, timeout))
+        self.entered.set()
+        assert self.release.wait(timeout=10)
+        return self.models
+
+
+class _NoLock:
+    """空锁：只在这一个测试里还原「修复前没有事务锁」的行为。"""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *exception: object) -> bool:
+        return False
+
+
+class Worker:
+    """在后台线程里跑一次服务调用，并留住结果或异常。
+
+    线程里的异常不往上冒，所以必须自己收住 —— 否则写操作静默失败会被
+    读成「另一个写没生效」，把断言引到错误的方向。
+    """
+
+    def __init__(self, action) -> None:
+        self.action = action
+        self.started = threading.Event()
+        self.result: object = None
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._run)
+
+    def _run(self) -> None:
+        self.started.set()
+        try:
+            self.result = self.action()
+        except BaseException as error:  # noqa: BLE001 - 测试要留住任何失败
+            self.error = error
+
+    def start(self) -> "Worker":
+        self.thread.start()
+        return self
+
+    def join(self) -> "Worker":
+        # 超时是死锁兜底：真被锁住了要报错，不能让用例永久挂住。
+        self.thread.join(timeout=10)
+        assert not self.thread.is_alive(), "后台的配置写操作没有结束（疑似被锁住）"
+        return self
+
+
+def _service(tmp_path: Path, store, discoverer=None) -> ModelConnectionService:
+    return ModelConnectionService(
+        _base_registry(tmp_path), store, discoverer=discoverer or FakeDiscoverer()
+    )
+
+
+def _ids(service: ModelConnectionService) -> list[str]:
+    return [item.id for item in service.store.load().connections]
+
+
+def _assert_disk_matches_registry(service: ModelConnectionService) -> None:
+    """磁盘配置与运行时快照必须是同一代：文件里的模型都能在表里找到。"""
+    data = service.store.load()
+    expected = {entry.id for entry in service.base.entries} | {
+        model.id for connection in data.connections for model in connection.models
+    }
+    assert {entry.id for entry in service.registry.current.entries} == expected
+    assert service.registry.current.default_id == (
+        data.default_id or service.base.default_id
+    )
+
+
+def test_concurrent_inserts_keep_both_connections(tmp_path) -> None:
+    """两条新增并发执行，最终两条都得留下 —— 这就是原问题的最短复现。"""
+    store = InterleavingStore(tmp_path / "model-connections.json")
+    store.pause_before_write = True
+    service = _service(tmp_path, store)
+
+    first = Worker(
+        lambda: service.upsert(
+            "first",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m1", "model": "alpha"}],
+        )
+    ).start()
+    # 第一条正停在「读完了、还没落盘」：修复前，第二条就是在这里读到同一份
+    # 旧配置的。加锁之后它会一直等到整条事务结束。
+    assert store.write_started.wait(timeout=10)
+    second = Worker(
+        lambda: service.upsert(
+            "second",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m2", "model": "beta"}],
+        )
+    ).start()
+    assert second.started.wait(timeout=10)
+    store.release_write.set()
+    first.join()
+    second.join()
+
+    assert first.error is None and second.error is None
+    assert _ids(service) == ["first", "second"]
+    assert store.overlaps == []
+    _assert_disk_matches_registry(service)
+
+
+def test_concurrent_updates_do_not_lose_one_of_them(tmp_path) -> None:
+    """两条连接各自被并发更新：后写入的那份不能把前一份的改动抹掉。"""
+    store = InterleavingStore(tmp_path / "model-connections.json")
+    service = _service(tmp_path, store)
+    for connection_id, model_id in (("first", "m1"), ("second", "m2")):
+        service.upsert(
+            connection_id,
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": model_id, "model": "alpha"}],
+        )
+
+    store.pause_before_write = True
+    renaming = Worker(
+        lambda: service.upsert(
+            "first",
+            base_url=BASE_URL,
+            label="改过的第一条",
+            models=[{"id": "m1", "model": "alpha"}],
+        )
+    ).start()
+    assert store.write_started.wait(timeout=10)
+    rekeying = Worker(
+        lambda: service.upsert(
+            "second",
+            base_url=BASE_URL,
+            label="改过的第二条",
+            api_key=ROTATED_KEY,
+            models=[{"id": "m2", "model": "beta"}],
+        )
+    ).start()
+    assert rekeying.started.wait(timeout=10)
+    store.release_write.set()
+    renaming.join()
+    rekeying.join()
+
+    assert renaming.error is None and rekeying.error is None
+    saved = service.store.load().connections
+    assert [item.label for item in saved] == ["改过的第一条", "改过的第二条"]
+    assert [item.api_key for item in saved] == [TEST_KEY, ROTATED_KEY]
+    assert store.overlaps == []
+    _assert_disk_matches_registry(service)
+
+
+def test_concurrent_default_change_and_insert_are_both_kept(tmp_path) -> None:
+    """改默认模型与新增连接同时发生：两处改动都要落在同一份配置上。"""
+    store = InterleavingStore(tmp_path / "model-connections.json")
+    service = _service(tmp_path, store)
+    service.upsert(
+        "local",
+        base_url=BASE_URL,
+        api_key=TEST_KEY,
+        models=[{"id": "m1", "model": "alpha"}],
+    )
+
+    store.pause_before_write = True
+    adding = Worker(
+        lambda: service.upsert(
+            "second",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m2", "model": "beta"}],
+        )
+    ).start()
+    assert store.write_started.wait(timeout=10)
+    switching = Worker(lambda: service.set_default("m1")).start()
+    assert switching.started.wait(timeout=10)
+    store.release_write.set()
+    adding.join()
+    switching.join()
+
+    assert adding.error is None and switching.error is None
+    assert _ids(service) == ["local", "second"]
+    assert service.registry.current.default_id == "m1"
+    assert store.overlaps == []
+    _assert_disk_matches_registry(service)
+
+
+def test_describe_never_combines_two_generations(tmp_path) -> None:
+    """删掉默认连接会同时改动清单与默认模型，读接口不能各取一代。"""
+    store = InterleavingStore(tmp_path / "model-connections.json")
+    service = _service(tmp_path, store)
+    service.upsert(
+        "local",
+        base_url=BASE_URL,
+        api_key=TEST_KEY,
+        models=[{"id": "m1", "model": "alpha"}],
+    )
+    service.set_default("m1")
+
+    # 停在「文件已更新、快照还没换」的那一刻：不加锁的读正是在这里读到新
+    # 文件配旧注册表 —— 清单里已经没有 local，默认却还指着 m1。
+    store.pause_after_write = True
+    removing = Worker(lambda: service.delete("local")).start()
+    assert store.file_written.wait(timeout=10)
+    reader = Worker(service.describe).start()
+    assert reader.started.wait(timeout=10)
+    store.release_replace.set()
+    removing.join()
+    reader.join()
+
+    assert removing.error is None and reader.error is None
+    body = reader.result
+    assert body is not None
+    pair = (body["default"], [item["id"] for item in body["connections"]])
+    assert pair in (("m1", ["local"]), (GENERATOR_EXTRACTIVE, []))
+    assert store.overlaps == []
+    _assert_disk_matches_registry(service)
+
+
+def test_a_failing_write_leaves_the_other_transaction_intact(tmp_path) -> None:
+    """一条写失败时，另一条并发写留下的配置在磁盘与内存里都必须完好。"""
+    path = tmp_path / "model-connections.json"
+    calls = {"count": 0}
+
+    class SecondSaveFails(InterleavingStore):
+        def save(self, data: ConnectionFile) -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("磁盘写入失败")
+            super().save(data)
+
+    store = SecondSaveFails(path)
+    store.pause_before_write = True
+    service = _service(tmp_path, store)
+
+    saving = Worker(
+        lambda: service.upsert(
+            "first",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m1", "model": "alpha"}],
+        )
+    ).start()
+    assert store.write_started.wait(timeout=10)
+    failing = Worker(
+        lambda: service.upsert(
+            "second",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m2", "model": "beta"}],
+        )
+    ).start()
+    assert failing.started.wait(timeout=10)
+    store.release_write.set()
+    saving.join()
+    failing.join()
+
+    assert saving.error is None
+    assert isinstance(failing.error, OSError)
+    # 失败的那条既没有落盘也没有进快照；成功的那条在两个地方都在。
+    assert _ids(service) == ["first"]
+    assert service.registry.current.entry("m2") is None
+    assert store.overlaps == []
+    _assert_disk_matches_registry(service)
+
+
+def test_a_slow_discovery_does_not_block_configuration_writes(tmp_path) -> None:
+    """远端发现可以卡很久，但不能把本机的连接增删改锁在门外。"""
+    discoverer = BlockingDiscoverer()
+    service = _service(
+        tmp_path, ConnectionStore(tmp_path / "model-connections.json"), discoverer
+    )
+    service.upsert(
+        "local",
+        base_url=BASE_URL,
+        api_key=TEST_KEY,
+        models=[{"id": "m1", "model": "alpha"}],
+    )
+
+    discovery = Worker(lambda: service.discover_connection("local")).start()
+    assert discoverer.entered.wait(timeout=10)
+
+    # 发现还卡在远端时，一次配置修改必须能照常跑完 —— 如果它在锁上等，
+    # join() 会因超时直接断言失败，而不是悄悄挂住。
+    rotated = Worker(
+        lambda: service.upsert(
+            "local",
+            base_url=BASE_URL,
+            label="换过密钥的连接",
+            api_key=ROTATED_KEY,
+            models=[{"id": "m1", "model": "alpha"}],
+        )
+    ).start()
+    assert rotated.started.wait(timeout=10)
+    rotated.join()
+    assert rotated.error is None
+
+    discoverer.release.set()
+    discovery.join()
+    assert discovery.error is None
+    # 本次发现用的是开始时取到的那一份快照：地址与密钥都是旧的。
+    assert discoverer.calls == [(BASE_URL, TEST_KEY, DEFAULT_TIMEOUT)]
+    assert discovery.result == {"base_url": BASE_URL, "models": ["alpha", "beta"]}
+    assert service.store.load().connections[0].api_key == ROTATED_KEY
+
+
+def test_the_lock_is_what_prevents_the_lost_update(tmp_path) -> None:
+    """摘掉事务锁，同一个交错就真的会丢一条连接。
+
+    这条用例是上面那几条的对照组：它证明「两条并发新增都留下」不是空跑 ——
+    把锁换成空实现、复现修复前的行为，后落盘的那份就把前一份整条覆盖掉。
+    """
+    store = InterleavingStore(tmp_path / "model-connections.json")
+    store.pause_before_write = True
+    service = _service(tmp_path, store)
+    service._lock = _NoLock()
+
+    first = Worker(
+        lambda: service.upsert(
+            "first",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m1", "model": "alpha"}],
+        )
+    ).start()
+    assert store.write_started.wait(timeout=10)
+    # 没有锁，第二条整条跑完 —— 它读到的是还没有 first 的那份旧配置。
+    second = Worker(
+        lambda: service.upsert(
+            "second",
+            base_url=BASE_URL,
+            api_key=TEST_KEY,
+            models=[{"id": "m2", "model": "beta"}],
+        )
+    ).start()
+    second.join()
+    assert second.error is None
+    store.release_write.set()
+    first.join()
+    assert first.error is None
+
+    # 后落盘的第一条覆盖了第二条：磁盘上只剩一条连接，而且探针确实记下了
+    # 这次「上一条还没落盘就又重新读配置」的交错。
+    assert _ids(service) == ["first"]
+    assert store.overlaps != []
+    assert service.registry.current.entry("m2") is None

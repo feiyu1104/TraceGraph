@@ -277,6 +277,7 @@ curl -X PUT http://127.0.0.1:8000/models/default \
 - 上游响应只读 `data[].id`，去重、丢掉空值，条数上限 200、响应体上限 2 MiB；上游的响应正文不会原样返回给客户端。
 - 400 `invalid_base_url` / `invalid_connection` / `discovery_invalid_response`；401 `discovery_unauthorized`（上游拒绝）；403 `management_forbidden`（非环回来源）；404 `connection_not_found`；409 `connection_conflict`（ID 冲突）或 `connection_file_invalid`（连接文件损坏）；502 `discovery_unreachable` / `discovery_upstream_error`；503 `model_management_unavailable`（没装配连接管理）/ `generator_unavailable`。
 - 校验失败时磁盘与运行中的注册表都不变；落盘失败时旧文件与旧注册表也保持不变。
+- 连接的读改写改由**进程内的一把锁**整体串行化：并发提交的增删改一条条排队执行，后落盘的不会把先落盘的覆盖掉，查询接口也不会把两代配置拼进同一个响应。`start.ps1` 启动的就是**单进程**服务，这把锁因此够用。**多个 uvicorn worker（或多台机器）同时改同一个连接文件不在支持范围内**——进程内的锁管不到别的进程，本批也**没有**实现跨进程文件锁；真要那样部署，得先补上跨进程文件锁，或者把模型连接挪到一个独立的配置服务里。
 - 运行时连接是**追加**在基础配置之上的：基础条目的 ID 一个都不许被覆盖，冲突会被 409 拒绝，`config/models.local.json` 不会被改写。
 
 ## 本机 Neo4j

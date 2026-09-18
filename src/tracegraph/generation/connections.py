@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from threading import RLock
 from urllib.parse import urlsplit
 
 from tracegraph.generation.config import DEFAULT_TIMEOUT, GENERATOR_EXTRACTIVE
@@ -488,9 +489,23 @@ def build_registry(base: ModelRegistry, data: ConnectionFile) -> ModelRegistry:
 class ModelConnectionService:
     """模型连接的读写与运行时装配。
 
-    它是唯一改动连接文件的地方，也是唯一替换运行注册表的地方，顺序永远是
-    「先校验并装配出新快照 → 再原子落盘 → 最后一次性替换」。于是校验失败时
-    磁盘与内存都不动；落盘失败时运行中的注册表仍是上一份完整的表。
+    它是唯一改动连接文件的地方，也是唯一替换运行注册表的地方。每次写操作都是
+    一条**完整的配置事务**：
+
+        读取当前配置 → 校验并构造候选配置 → 装配新注册表 → 原子落盘 → 替换快照
+
+    这条事务由 `_lock` 整体串行化。只在落盘那一步加锁是不够的：候选配置是在
+    读取之后、落盘之前从旧配置上构造出来的，两个并发请求若都读到同一份旧配置，
+    后写入的那一份就会把前一份的改动整条抹掉 —— 两个 upsert 都返回成功，磁盘上
+    却只剩一条连接。于是校验失败时磁盘与内存都不动；落盘失败时运行中的注册表
+    仍是上一份完整的表。
+
+    锁只覆盖配置事务，不覆盖网络：`discover_connection()` 在锁内固定一份不可变
+    的连接快照，出了锁再请求远端 `/models`，一个慢网关不会挡住本机的连接增删改。
+    只读的高频接口（`/models`、`/system`）读的是不可变注册表快照，不走这把锁。
+
+    这是**进程内**锁：连接文件的读改写改在单进程内串行，多进程（多个 uvicorn
+    worker 或多台机器）同时写同一个文件不在本批的保护范围内。
     """
 
     def __init__(
@@ -504,27 +519,44 @@ class ModelConnectionService:
         self.store = store
         self.registry = RefreshingModelRegistry(_initial_registry(base, store))
         self._discoverer = discoverer
+        # 用 RLock 而不是 Lock：事务里的内部函数可以复用同一把锁而不自锁。
+        # 两把锁的获取顺序始终是「先事务锁、后注册表锁」，不存在环。
+        self._lock = RLock()
 
     def describe(self) -> dict[str, object]:
-        """`GET /model-connections` 的响应体；任何情况下都不含 API Key。"""
-        data = self.store.load()
-        return {
-            "default": self.registry.current.default_id,
-            "connections": [item.describe() for item in data.connections],
-        }
+        """`GET /model-connections` 的响应体；任何情况下都不含 API Key。
+
+        文件与注册表在同一把锁内读取：并发修改时不会把上一代的连接清单和
+        这一代的默认模型拼进同一个响应里。
+        """
+        with self._lock:
+            data = self.store.load()
+            return {
+                "default": self.registry.current.default_id,
+                "connections": [item.describe() for item in data.connections],
+            }
 
     def discover(
         self, *, base_url: object, api_key: object, timeout: object = None
     ) -> dict[str, object]:
-        """用临时凭证试一次发现：既不落盘，也不建连接。"""
+        """用临时凭证试一次发现：既不落盘，也不建连接。
+
+        它既不读也不写连接存储，因此不属于配置事务，也就不需要那把锁。
+        """
         url = normalize_base_url(base_url)
         key = normalize_api_key(api_key)
         seconds = normalize_timeout(timeout)
         return {"base_url": url, "models": list(self._discoverer(url, key, seconds))}
 
     def discover_connection(self, connection_id: object) -> dict[str, object]:
-        """用已保存的地址与密钥重新发现；客户端不必再提交一次密钥。"""
-        connection = self._find(connection_id)
+        """用已保存的地址与密钥重新发现；客户端不必再提交一次密钥。
+
+        锁内只做一件事：取一份不可变的连接快照。远程请求在锁外进行，一次
+        几十秒的发现不会把连接的增删改挡在门外。连接随后被改动也不影响本次
+        结果 —— 用的是开始时取到的那一份，密钥同理。
+        """
+        with self._lock:
+            connection = self._find_in(self.store.load(), connection_id)
         models = self._discoverer(
             connection.base_url, connection.api_key, connection.timeout
         )
@@ -544,85 +576,108 @@ class ModelConnectionService:
 
         `api_key` 省略表示沿用已保存的密钥；显式给出空字符串一律报错，绝不
         让它悄悄把原密钥覆盖成空。
-        """
-        existing = self._find(connection_id, required=False)
-        if api_key is None:
-            if existing is None:
-                raise InvalidConnectionError(
-                    "创建连接时必须提供 api_key；更新时省略该字段表示沿用原密钥。"
-                )
-            key = existing.api_key
-        else:
-            key = normalize_api_key(api_key)
 
-        connection = parse_connection(
-            {
-                "id": connection_id,
-                "label": label,
-                "base_url": base_url,
-                "api_key": key,
-                "timeout": timeout,
-                "models": list(models),
-            },
-            where="请求体",
-        )
-        data = self.store.load()
-        connections = list(data.connections)
-        index = next(
-            (position for position, item in enumerate(connections) if item.id == connection.id),
-            None,
-        )
-        if index is None:
-            connections.append(connection)
-        else:
-            connections[index] = connection
-        self._commit(ConnectionFile(data.default_id, tuple(connections)))
-        return connection.describe()
+        「读旧配置 → 定密钥 → 改清单 → 落盘 → 替换」整条事务在锁内完成，
+        并且只读一次文件：另一次并发写在事务开始前就已被挡在锁外。
+        """
+        with self._lock:
+            data = self.store.load()
+            existing = self._find_in(data, connection_id, required=False)
+            if api_key is None:
+                if existing is None:
+                    raise InvalidConnectionError(
+                        "创建连接时必须提供 api_key；更新时省略该字段表示沿用原密钥。"
+                    )
+                key = existing.api_key
+            else:
+                key = normalize_api_key(api_key)
+
+            connection = parse_connection(
+                {
+                    "id": connection_id,
+                    "label": label,
+                    "base_url": base_url,
+                    "api_key": key,
+                    "timeout": timeout,
+                    "models": list(models),
+                },
+                where="请求体",
+            )
+            connections = list(data.connections)
+            index = next(
+                (
+                    position
+                    for position, item in enumerate(connections)
+                    if item.id == connection.id
+                ),
+                None,
+            )
+            if index is None:
+                connections.append(connection)
+            else:
+                connections[index] = connection
+            self._commit(ConnectionFile(data.default_id, tuple(connections)))
+            return connection.describe()
 
     def delete(self, connection_id: object) -> dict[str, object]:
-        if isinstance(connection_id, str) and connection_id in RESERVED_MODEL_IDS:
-            raise InvalidConnectionError(
-                f"{GENERATOR_EXTRACTIVE} 是内置模型，不是可以删除的连接。"
+        """删除连接及它注册的模型；默认模型属于它时自动回到内置离线选项。"""
+        with self._lock:
+            if isinstance(connection_id, str) and connection_id in RESERVED_MODEL_IDS:
+                raise InvalidConnectionError(
+                    f"{GENERATOR_EXTRACTIVE} 是内置模型，不是可以删除的连接。"
+                )
+            data = self.store.load()
+            connection = self._find_in(data, connection_id)
+            remaining = tuple(
+                item for item in data.connections if item.id != connection.id
             )
-        connection = self._find(connection_id)
-        data = self.store.load()
-        remaining = tuple(
-            item for item in data.connections if item.id != connection.id
-        )
-        removed = {model.id for model in connection.models}
-        default_id = data.default_id
-        if default_id in removed:
-            # 默认模型跟着连接一起消失：回到内置离线选项，而不是留一个指向
-            # 空处的默认值，让后续请求全部失败。
-            default_id = GENERATOR_EXTRACTIVE
-        self._commit(ConnectionFile(default_id, remaining))
-        return {"id": connection.id, "default": self.registry.current.default_id}
+            removed = {model.id for model in connection.models}
+            default_id = data.default_id
+            if default_id in removed:
+                # 默认模型跟着连接一起消失：回到内置离线选项，而不是留一个
+                # 指向空处的默认值，让后续请求全部失败。
+                default_id = GENERATOR_EXTRACTIVE
+            self._commit(ConnectionFile(default_id, remaining))
+            return {"id": connection.id, "default": self.registry.current.default_id}
 
     def set_default(self, model_id: object) -> dict[str, object]:
-        """改默认模型；返回与 `GET /models` 同形的清单，界面一次刷新到位。"""
-        # 内置的 extractive 可以选：把默认模型切回离线是正常操作。
-        normalized = normalize_id(model_id, field="模型 ID", allow_reserved=True)
-        entry = self.registry.current.entry(normalized)
-        if entry is None:
-            # 未知与不可用沿用既有的错误语义，与 /query、/extractions 一致。
-            raise UnknownGeneratorError(f"未知的模型 ID：{normalized}")
-        if not entry.available:
-            raise UnavailableGeneratorError(entry)
-        data = self.store.load()
-        self._commit(ConnectionFile(normalized, data.connections))
-        return self.registry.current.describe()
+        """改默认模型；返回与 `GET /models` 同形的清单，界面一次刷新到位。
+
+        选中的模型来自注册表快照，与随后写入的清单出自同一代配置。
+        """
+        with self._lock:
+            # 内置的 extractive 可以选：把默认模型切回离线是正常操作。
+            normalized = normalize_id(model_id, field="模型 ID", allow_reserved=True)
+            entry = self.registry.current.entry(normalized)
+            if entry is None:
+                # 未知与不可用沿用既有的错误语义，与 /query、/extractions 一致。
+                raise UnknownGeneratorError(f"未知的模型 ID：{normalized}")
+            if not entry.available:
+                raise UnavailableGeneratorError(entry)
+            data = self.store.load()
+            self._commit(ConnectionFile(normalized, data.connections))
+            return self.registry.current.describe()
 
     def _commit(self, candidate: ConnectionFile) -> None:
-        """校验 → 落盘 → 替换。三步的顺序就是这个功能的一致性边界。"""
+        """校验 → 落盘 → 替换。三步的顺序就是这个功能的一致性边界。
+
+        调用方必须持有 `_lock`：候选配置是在此之前从旧配置上构造出来的，
+        只锁这三步挡不住并发写各自基于同一份旧配置构造候选。
+        """
         snapshot = build_registry(self.base, candidate)
         self.store.save(candidate)
         self.registry.replace(snapshot)
 
-    def _find(
-        self, connection_id: object, *, required: bool = True
+    def _find_in(
+        self, data: ConnectionFile, connection_id: object, *, required: bool = True
     ) -> ModelConnection | None:
+        """在**已经读到的**那份配置里找连接。
+
+        查找不重新读文件：一次事务只加载一次配置，读到的就是这次事务认定的
+        那一代状态，中途被别的写操作改写也不会让同一次事务前后看到两份配置。
+        """
         text = connection_id if isinstance(connection_id, str) else ""
-        for connection in self.store.load().connections:
+        for connection in data.connections:
             if connection.id == text:
                 return connection
         if required:
