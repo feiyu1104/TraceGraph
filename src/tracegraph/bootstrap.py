@@ -10,6 +10,11 @@ from tracegraph.domains.medical.adapter import MedicalDomainAdapter
 from tracegraph.domains.registry import build_default_adapter_registry
 from tracegraph.feedback.storage import SQLiteFeedbackRepository
 from tracegraph.generation.config import FALLBACK_EXTRACTIVE, load_generation_fallback
+from tracegraph.generation.connections import (
+    ConnectionStore,
+    ModelConnectionService,
+    load_connections_path,
+)
 from tracegraph.generation.models import ModelRegistry, load_model_registry
 from tracegraph.generation.providers import (
     AnswerGenerator,
@@ -33,7 +38,12 @@ load_local_env()
 def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastAPI:
     database_path = Path(database)
     database_path.parent.mkdir(parents=True, exist_ok=True)
+    # 先按现有配置（配置文件 / 环境变量 / 离线摘录）装配基础清单，再把运行期
+    # 保存的模型连接叠加上去。没有连接文件时这一层完全不存在，行为与改造前一致。
     registry = load_model_registry()
+    model_connections = ModelConnectionService(
+        base=registry, store=ConnectionStore(load_connections_path())
+    )
     fallback_name = load_generation_fallback()
     documents = SQLiteDocumentRepository(database_path)
     originals = FileSystemOriginalStore(load_original_store_root())
@@ -59,9 +69,13 @@ def create_local_app(database: str | Path = "data/local/tracegraph.db") -> FastA
         graph_repository=graph,
         answer_generator=registry.default_generator,
         fallback_answer_generator=_fallback_generator(fallback_name),
-        model_registry=registry,
+        # 交给应用的是可刷新的句柄：改完默认模型或增删连接之后，后续请求、
+        # 抽取与 /models、/system 立刻看到新表，不需要重启。
+        model_registry=model_connections.registry,
+        model_connections=model_connections,
         graph_status=selection.to_dict(),
-        generation_status=registry.system_status(fallback_name),
+        # 只传降级策略名，模型状态由 /system 按当下生效的注册表现算。
+        generation_fallback=fallback_name,
         original_store=originals,
         adapter_registry=build_default_adapter_registry(),
         candidate_repository=candidates,

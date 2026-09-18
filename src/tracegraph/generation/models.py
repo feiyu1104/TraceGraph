@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
+from threading import Lock
 
 from tracegraph.generation.config import (
     DEFAULT_TIMEOUT,
@@ -101,12 +102,26 @@ class ModelRegistry:
             self._by_id.setdefault(entry.id, entry)
 
     @property
+    def current(self) -> "ModelRegistry":
+        """本次调用应当使用的那一份快照。
+
+        注册表自身就是一份不可变快照，因此这里返回自己；可刷新的注册表
+        （`RefreshingModelRegistry`）返回当下生效的那一份。服务对象按这份
+        快照做每一步推导，两种注册表因此可以互换着装配。
+        """
+        return self
+
+    @property
     def default_entry(self) -> ModelEntry:
         return self._by_id[self.default_id]
 
     @property
     def default_generator(self) -> AnswerGenerator:
         return self._generators[self.default_id]
+
+    def generator_map(self) -> Mapping[str, AnswerGenerator]:
+        """按 ID 索引的生成器副本；合并运行时模型时要用到基础模型的生成器。"""
+        return dict(self._generators)
 
     def entry(self, generator_id: str) -> ModelEntry | None:
         return self._by_id.get(generator_id)
@@ -139,6 +154,18 @@ class ModelRegistry:
             raise UnavailableGeneratorError(entry)
         return self._generators[generator_id]
 
+    def resolve_selection(
+        self, requested_id: str | None = None
+    ) -> tuple[str, AnswerGenerator]:
+        """一次调用同时给出「按哪个 ID 报告」与「用哪个生成器」。
+
+        两者必须来自同一份快照：分两次取会在注册表被替换的瞬间错配 ——
+        ID 来自旧表、生成器来自新表，metrics 于是报出一个跟实际产物对不上
+        的名字。返回的生成器由调用方一直用到本次请求结束。
+        """
+        model_id = requested_id or self.default_id
+        return model_id, self.resolve(model_id)
+
     def id_of(self, generator: AnswerGenerator) -> str:
         """反查生成器实例的模型 ID，供 metrics 报告「这次真正用了谁」。
 
@@ -150,6 +177,34 @@ class ModelRegistry:
             if candidate is generator:
                 return model_id
         return getattr(generator, "name", "custom")
+
+
+class RefreshingModelRegistry:
+    """可整体替换的注册表句柄，供运行时增删模型使用。
+
+    服务对象长期持有这个句柄而不是某一份快照，因此刷新之后不会有谁还在用
+    旧表。快照本身不可变，替换就是一次引用赋值：读取不加锁 —— 读到的要么
+    是替换前的整份表、要么是替换后的整份表，不存在改了一半的表；写入加锁
+    是为了标明「这是一次整体替换」，而不是逐字段修改。
+
+    已经在跑的请求拿着它自己解析出的生成器继续跑完，不受替换影响。
+    """
+
+    def __init__(self, initial: ModelRegistry) -> None:
+        self._snapshot = initial
+        self._lock = Lock()
+
+    @property
+    def current(self) -> ModelRegistry:
+        return self._snapshot
+
+    def replace(self, registry: ModelRegistry) -> None:
+        with self._lock:
+            self._snapshot = registry
+
+
+# 服务对象接受的两种注册表：一份固定快照，或一个可刷新的快照句柄。
+RegistrySource = ModelRegistry | RefreshingModelRegistry
 
 
 def single_generator_registry(generator: AnswerGenerator) -> ModelRegistry:

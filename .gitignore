@@ -19,6 +19,9 @@ config/models.local.json
 
 # Runtime data
 data/local/
+# 服务端保存的模型连接：里面有明文 API Key，只留在本机运行目录里。
+# 用 TRACEGRAPH_MODEL_CONNECTIONS 把它挪到别处时，记得自己把新位置也忽略掉。
+data/local/model-connections.json
 # 上传原件的落盘目录：里面是用户上传的真实文档，绝不能进版本库
 data/workspaces/
 logs/

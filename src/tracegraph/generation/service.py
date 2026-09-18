@@ -7,7 +7,7 @@ from tracegraph.core.contracts import (
     Evidence,
 )
 from tracegraph.core.ports import DomainAdapter, GraphRepository, Retriever
-from tracegraph.generation.models import ModelRegistry, single_generator_registry
+from tracegraph.generation.models import RegistrySource, single_generator_registry
 from tracegraph.generation.providers import (
     AnswerGenerator,
     ExtractiveAnswerGenerator,
@@ -44,7 +44,7 @@ class AnswerService:
         generator: AnswerGenerator | None = None,
         graph_repository: GraphRepository | None = None,
         fallback_generator: AnswerGenerator | None = None,
-        registry: ModelRegistry | None = None,
+        registry: RegistrySource | None = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
     ) -> None:
         self.retriever = retriever
@@ -57,7 +57,9 @@ class AnswerService:
         self.registry = registry or single_generator_registry(
             generator or ExtractiveAnswerGenerator()
         )
-        self.generator = self.registry.default_generator
+        # 装配那一刻的默认生成器。可刷新的注册表句柄本身没有生成器，取当下
+        # 那份快照；真正的模型选择在每次 answer() 里按当次快照现算。
+        self.generator = self.registry.current.default_generator
 
     def for_workspace(
         self,
@@ -93,14 +95,12 @@ class AnswerService:
         # 模型选择是「每次请求」的事：解析结果只活在本次调用里，没有会被
         # 并发请求互相覆盖的进程级状态。未知或不可用的模型在这里抛出，
         # 由 API 层翻译成 400 / 503。
-        generator = (
-            self.registry.default_generator
-            if generator_id is None
-            else self.registry.resolve(generator_id)
-        )
-        # 失败时报告「本来要用哪一个」，成功时报告「真正用了哪一个」，
-        # 两者都是清单里的 ID —— 界面按 ID 反查显示名称。
-        requested_id = generator_id or self.registry.default_id
+        #
+        # 注册表可能在这次请求期间被运行时替换，所以先固定一份快照：报告的
+        # ID 与真正使用的生成器必须出自同一份表，否则 metrics 会报出一个
+        # 跟实际产物对不上的名字。这份生成器一直用到本次回答结束。
+        snapshot = self.registry.current
+        requested_id, generator = snapshot.resolve_selection(generator_id)
         normalized = self.domain.normalize_question(question)
         if not normalized:
             raise ValueError("question 不能为空")
@@ -173,7 +173,9 @@ class AnswerService:
                 "derived_association_count": float(len(associations)),
                 "max_hops": float(max_hops),
                 "requested_generator": requested_id,
-                "generator": self.registry.id_of(active),
+                # 用本次请求固定的那份快照反查：换成当下的新快照，会让
+                # 「请求的模型」与「报告的生成器」在并发刷新时对不上。
+                "generator": snapshot.id_of(active),
                 "model": _generator_model(active),
                 "generation_degraded": degraded_from is not None,
             },

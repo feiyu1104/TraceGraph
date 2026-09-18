@@ -32,6 +32,7 @@ from tracegraph.generation.models import (
     KIND_EXTRACTIVE,
     KIND_OPENAI,
     ModelRegistry,
+    RegistrySource,
 )
 from tracegraph.generation.providers import ChatCompleter
 
@@ -87,7 +88,7 @@ class ExtractionService:
         documents: DocumentRepository,
         adapters: AdapterRegistry,
         candidates: CandidateRepository,
-        models: ModelRegistry,
+        models: RegistrySource,
     ) -> None:
         self.documents = documents
         self.adapters = adapters
@@ -113,10 +114,13 @@ class ExtractionService:
         version = self._resolve_version(
             document_id, document_version_id, workspace_id=workspace.id
         )
-        resolved_model = model_id or self.models.default_id
+        # 注册表可能在这次抽取期间被运行时替换，因此先固定一份快照：模型 ID、
+        # 生成器与条目类型必须出自同一份表，否则一次并发更新就可能让这次抽取
+        # 拿着新表的类型去决定旧表的生成器怎么用。
+        snapshot = self.models.current
         # 未知与不可用由注册表分别报出，接口层按既有约定映射成 400 与 503。
-        generator = self.models.resolve(resolved_model)
-        extractor = self._extractor_for(resolved_model, generator)
+        resolved_model, generator = snapshot.resolve_selection(model_id)
+        extractor = self._extractor_for(snapshot, resolved_model, generator)
 
         now = _timestamp()
         run = ExtractionRun(
@@ -198,9 +202,9 @@ class ExtractionService:
         return version
 
     def _extractor_for(
-        self, model_id: str, generator: object
+        self, models: ModelRegistry, model_id: str, generator: object
     ) -> ExtractiveCandidateExtractor | ModelCandidateExtractor:
-        entry = self.models.entry(model_id)
+        entry = models.entry(model_id)
         kind = entry.kind if entry is not None else ""
         if kind == KIND_EXTRACTIVE:
             return ExtractiveCandidateExtractor()

@@ -162,7 +162,7 @@ cp config/models.example.json config/models.local.json
 几条硬规则：
 
 - **`config/models.local.json` 已被 `.gitignore` 忽略**。它会写满你个人的网关地址，属于本机配置，不要提交。仓库里只保留不含真实地址的 `config/models.example.json`。
-- **清单里只写环境变量名**。密钥本身只存在于 `.env` 或系统环境变量，清单文件里永远不该出现。
+- **清单里只写环境变量名**。密钥本身只存在于 `.env` 或系统环境变量，清单文件里永远不该出现。（服务端还可以另外保存本机的模型连接，那是另一条路径，见后面的[密钥](#密钥)一节。）
 - **缺少模型名称、地址或密钥的条目会被标记为不可用**，网页上显示原因并禁止选择——但**不会阻止进程启动**。只有一个例外：**默认模型自己不可用时会明确报错并拒绝启动**，因为那意味着每个请求都会失败。
 - **不会回退到另一个在线模型**。选了不可用的模型，请求直接失败并返回 `generator_unavailable`；只有显式设置 `TRACEGRAPH_LLM_FALLBACK=extractive` 时才降级到离线摘录。
 
@@ -182,7 +182,7 @@ curl -X POST http://127.0.0.1:8000/query \
 curl http://127.0.0.1:8000/models
 ```
 
-每一项只有 `id`、`label`、`model`、`available`、`kind` 五个字段（不可用时多一个 `reason`）。**刻意不返回 `base_url`**：自建网关常把凭证写在地址里，所以连地址都不透出。API Key、Authorization 头和任何带凭证的 URL 参数都不在这个接口里，也不在任何其他接口里。
+每一项只有 `id`、`label`、`model`、`available`、`kind` 五个字段（不可用时多一个 `reason`）。**刻意不返回 `base_url`**：自建网关常把凭证写在地址里，所以连地址都不透出。API Key、Authorization 头和任何带凭证的 URL 参数都不在这个接口里，也不在任何其他接口里——`GET /model-connections` 是唯一的例外，它返回服务端保存的**已验证去掉凭证的** `base_url`，但密钥仍然只以 `has_api_key` 的形式出现。
 
 ### 模型失败时会发生什么
 
@@ -218,11 +218,66 @@ curl http://127.0.0.1:8000/system
 
 ### 密钥
 
-API Key 只从环境变量读取，不写入源码、文档、日志，也不出现在任何接口响应里。`.env` 已被 `.gitignore` 忽略，`.env.example` 里只有空值——**不要把自己的密钥填进会被提交的文件**。
+密钥有两条存放路径，**都由服务端持有，任何一条都不把密钥交给浏览器读取**。
 
-**为什么不能由前端填写 API Key。** 密钥一旦进入浏览器，就必须经过网络下发到页面、落在浏览器内存和开发者工具里、随前端构建产物一起分发，任何能打开页面的人都能拿走它——而它代表的是服务端进程持有的凭证。所以网页上**没有、也不会有** API Key 输入框，同样不允许浏览器提交自定义的 `base_url` 或 `api_key`：那会把服务端变成一个任意地址的转发器（SSRF），也能让前端把密钥写到服务端的请求里。浏览器只能做一件事：从 `GET /models` 里挑一个服务端已经配置好的模型 ID。
+**一、环境变量（服务器部署推荐）。** `config/models.local.json` 里写的是**环境变量名**，不是密钥本身；密钥只存在于 `.env` 或系统环境变量里。`.env` 已被 `.gitignore` 忽略，`.env.example` 里只有空值——**不要把自己的密钥填进会被提交的文件**。
 
-需要换模型时改 `config/models.local.json` 和对应的环境变量，重启服务——这个动作只有能登服务器的人做得了。
+**二、服务端保存的模型连接（本机使用）。** 本机的管理接口允许把 `base_url`、`api_key`、`timeout` 与模型清单一起提交给**本机后端**，服务端把它们写进 `data/local/model-connections.json`（可用 `TRACEGRAPH_MODEL_CONNECTIONS` 改写位置）。这个文件已被 `.gitignore` 显式忽略，写入时尽力收紧到仅当前用户可读写。**它不是加密保险箱**：能读到这台机器上这个文件的人就能读到里面的密钥——它保证的只是「不进版本库、不回显、不进日志」。
+
+于是密钥的边界是这样的：
+
+- **本地设置页可以提交密钥给本机后端**，但密钥不写入浏览器存储（没有 `localStorage`、没有 Cookie），也不写入前端构建产物、SQLite、日志或错误响应。（本批只做了后端，网页端仍是只读的模型选择器。）
+- **`GET /models`、`GET /system`、`GET /model-connections` 都不返回密钥**：模型连接接口只报告 `has_api_key`，`/models` 连 `base_url` 都不透出。任何响应、错误信息与日志里都没有 API Key、Authorization 头或带凭证的 URL——反过来，`base_url` 里内嵌用户名密码、query 或 fragment 的地址会被直接拒绝。
+- **模型管理与模型发现接口只接受环回地址**（127.0.0.1 / ::1）的客户端，其他来源一律 403，也不添加宽松 CORS。这是本机管理接口的边界：**不允许把浏览器变成任意地址的转发器**，但内网地址（Ollama、LM Studio）是被允许的，因为那正是本机工具要接的东西。
+- **当前做法只适合单用户、本机部署。** 要把它暴露到局域网或公网，必须先补上认证、HTTPS 与专门的密钥管理；那种场景下**环境变量配置更合适**，密钥不该放在一个明文 JSON 文件里。
+- 这个文件也不是「配好就完事」：删掉它，行为就回到只有基础配置的样子。
+
+需要换模型时，服务器部署改 `config/models.local.json` 与对应环境变量后重启；本机使用则调下面的模型连接接口，改完立刻生效、不需要重启。
+
+### 本机模型连接接口
+
+六个接口都属于本机管理操作，**只允许环回客户端调用**，非环回来源返回 403 `management_forbidden`。它们读写的是服务端保存的连接，任何响应里都没有 API Key。
+
+```bash
+# 看一眼当前有哪些连接与模型（只有 has_api_key，没有密钥）
+curl http://127.0.0.1:8000/model-connections
+# {"default": "extractive",
+#  "connections": [{"id": "local", "label": "本地网关", "base_url": "http://127.0.0.1:11434/v1",
+#                   "timeout": 20.0, "has_api_key": true,
+#                   "models": [{"id": "qwen", "label": "通义千问", "model": "qwen2.5:7b"}]}]}
+
+# 用临时凭证试一次发现：不落盘、不建连接，密钥用完即弃
+curl -X POST http://127.0.0.1:8000/model-connections/discover \
+  -H "Content-Type: application/json" \
+  -d '{"base_url":"http://127.0.0.1:11434/v1","api_key":"sk-…"}'
+# {"base_url": "http://127.0.0.1:11434/v1", "models": ["qwen2.5:7b", "llama3.1:8b"]}
+
+# 用已保存的地址与密钥重新发现：不必再提交一次密钥
+curl -X POST http://127.0.0.1:8000/model-connections/local/discover
+
+# 新增或整体替换一条连接；省略 api_key 表示沿用已保存的密钥
+curl -X PUT http://127.0.0.1:8000/model-connections/local \
+  -H "Content-Type: application/json" \
+  -d '{"label":"本地网关","base_url":"http://127.0.0.1:11434/v1","api_key":"sk-…","timeout":20,
+       "models":[{"id":"qwen","label":"通义千问","model":"qwen2.5:7b"}]}'
+
+# 删除连接及它注册的模型；默认模型属于它时自动回到 extractive
+curl -X DELETE http://127.0.0.1:8000/model-connections/local
+# {"id": "local", "default": "extractive"}
+
+# 改默认模型，立刻生效：后续 /query 与 /extractions 不指定模型就用它
+curl -X PUT http://127.0.0.1:8000/models/default \
+  -H "Content-Type: application/json" -d '{"model_id":"qwen"}'
+```
+
+规则与错误码：
+
+- `base_url` 必须以 `http://` 或 `https://` 开头，不能带用户名密码、query 或 fragment；保存时去掉末尾 `/`。**内网地址是允许的**——Ollama、LM Studio 正靠它接入。
+- `timeout` 是 1–60 秒；`models[].id` 是本地 ID（`extractive` 是保留 ID，不能占用），`models[].model` 是传给上游的真实模型名。
+- 上游响应只读 `data[].id`，去重、丢掉空值，条数上限 200、响应体上限 2 MiB；上游的响应正文不会原样返回给客户端。
+- 400 `invalid_base_url` / `invalid_connection` / `discovery_invalid_response`；401 `discovery_unauthorized`（上游拒绝）；403 `management_forbidden`（非环回来源）；404 `connection_not_found`；409 `connection_conflict`（ID 冲突）或 `connection_file_invalid`（连接文件损坏）；502 `discovery_unreachable` / `discovery_upstream_error`；503 `model_management_unavailable`（没装配连接管理）/ `generator_unavailable`。
+- 校验失败时磁盘与运行中的注册表都不变；落盘失败时旧文件与旧注册表也保持不变。
+- 运行时连接是**追加**在基础配置之上的：基础条目的 ID 一个都不许被覆盖，冲突会被 409 拒绝，`config/models.local.json` 不会被改写。
 
 ## 本机 Neo4j
 
@@ -289,7 +344,7 @@ python -m uvicorn tracegraph.bootstrap:app --reload --host 127.0.0.1 --port 8000
 
 Web 界面顶部是状态栏（当前图后端、实际生效的生成器、模型名称、是否发生过降级、系统健康状态），左侧是知识问答与回答区，右侧是图谱浏览与文档导入。图谱浏览可以搜索疾病、症状、检查或药物，查看直接关系和每条关系对应的 DUTMed 原文位置。
 
-提问区里有**模型选择器**和**一跳 / 二跳 / 三跳**选择器。模型清单来自 `GET /models`，默认选中服务端指定的默认模型；不可用的模型会显示原因并且选不中；清单读取失败时页面仍能提问——离线摘录是内置的，永远可选。查询进行中两个选择器都会禁用，避免发出与预期不符的请求。页面自始至终只显示模型 ID、显示名称和模型名称，不显示网关地址，也没有任何密钥输入框。
+提问区里有**模型选择器**和**一跳 / 二跳 / 三跳**选择器。模型清单来自 `GET /models`，默认选中服务端指定的默认模型；不可用的模型会显示原因并且选不中；清单读取失败时页面仍能提问——离线摘录是内置的，永远可选。查询进行中两个选择器都会禁用，避免发出与预期不符的请求。页面自始至终只显示模型 ID、显示名称和模型名称，不显示网关地址；当前的网页端没有任何密钥输入框，密钥只由本机的管理接口提交给后端（见前面的[密钥](#密钥)一节）。
 
 查询期间只有一个状态提示：「正在检索证据并组织回答」。这是后端真实在做的事，页面不再用定时器模拟「正在检索证据 / 正在分析图路径 / 正在组织回答」这类并不存在的阶段。回答回来后，回答区顶部显示**本次真正生效**的生成模型；发生降级时会在旁边给出明确但不夸张的警告。
 

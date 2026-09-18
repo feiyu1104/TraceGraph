@@ -2,6 +2,7 @@ import base64
 import binascii
 from collections.abc import Mapping
 from datetime import UTC, datetime
+import ipaddress
 import os
 from pathlib import Path
 import sys
@@ -57,8 +58,14 @@ from tracegraph.extraction.providers import ExtractionError
 from tracegraph.extraction.service import ExtractionService
 from tracegraph.feedback.service import FeedbackService
 from tracegraph.feedback.storage import InMemoryFeedbackRepository
+from tracegraph.generation.config import FALLBACK_NONE
+from tracegraph.generation.connections import (
+    ModelConnectionError,
+    ModelConnectionService,
+)
+from tracegraph.generation.discovery import ModelDiscoveryError
 from tracegraph.generation.models import (
-    ModelRegistry,
+    RegistrySource,
     UnknownGeneratorError,
     UnavailableGeneratorError,
     single_generator_registry,
@@ -86,14 +93,6 @@ from tracegraph.review.service import CandidateReviewError, CandidateReviewServi
 from tracegraph.storage.candidates import InMemoryCandidateRepository
 from tracegraph.storage.memory import InMemoryDocumentRepository
 
-
-# 未显式传入生成配置时应用按离线摘录运行，`/system` 也必须如实这么报，
-# 否则「当前有没有接大模型」在默认构造路径上会变成空白。
-_OFFLINE_GENERATION_STATUS = {
-    "llm_configured": "false",
-    "llm_model": "",
-    "llm_fallback": "none",
-}
 
 # 上传体积上限，单位 MiB；可用 TRACEGRAPH_MAX_UPLOAD_MB 调整。
 MAX_UPLOAD_ENV = "TRACEGRAPH_MAX_UPLOAD_MB"
@@ -224,6 +223,40 @@ class ExtractionRequest(BaseModel):
     model_id: str | None = None
 
 
+class ModelDiscoveryRequest(BaseModel):
+    """用临时凭证试一次模型发现；这里的密钥只用于这一次请求，不落盘。"""
+
+    base_url: str
+    api_key: str
+    timeout: float | None = None
+
+
+class ConnectionModelRequest(BaseModel):
+    """连接里的一个可选模型：本地 ID、显示名、远端真实模型 ID。"""
+
+    id: str
+    label: str = ""
+    model: str
+
+
+class ModelConnectionRequest(BaseModel):
+    """新增或整体替换一条连接。
+
+    `api_key` 省略表示沿用已保存的密钥；显式给空字符串会被拒绝，空值绝不
+    悄悄覆盖已有密钥。
+    """
+
+    base_url: str
+    label: str = ""
+    api_key: str | None = None
+    timeout: float | None = None
+    models: list[ConnectionModelRequest] = Field(default_factory=list)
+
+
+class DefaultModelRequest(BaseModel):
+    model_id: str
+
+
 def create_app(
     repository: DocumentRepository | None = None,
     retriever: Retriever | None = None,
@@ -234,7 +267,9 @@ def create_app(
     fallback_answer_generator: AnswerGenerator | None = None,
     graph_status: Mapping[str, str] | None = None,
     generation_status: Mapping[str, str] | None = None,
-    model_registry: ModelRegistry | None = None,
+    generation_fallback: str = FALLBACK_NONE,
+    model_registry: RegistrySource | None = None,
+    model_connections: ModelConnectionService | None = None,
     original_store: OriginalDocumentStore | None = None,
     adapter_registry: AdapterRegistry | None = None,
     candidate_repository: CandidateRepository | None = None,
@@ -296,11 +331,36 @@ def create_app(
         version=__version__,
     )
 
+    def require_model_connections() -> ModelConnectionService:
+        """没有装配连接管理时明确报 503，而不是回一份空清单骗客户端。"""
+        if model_connections is None:
+            raise ApiError(503, "model_management_unavailable", "模型连接管理未启用。")
+        return model_connections
+
     @application.exception_handler(ApiError)
     async def handle_api_error(request: Request, error: ApiError) -> JSONResponse:
         return JSONResponse(
             status_code=error.status_code,
             content={"detail": error.detail, "error_code": error.error_code},
+        )
+
+    @application.exception_handler(ModelConnectionError)
+    async def handle_model_connection_error(
+        request: Request, error: ModelConnectionError
+    ) -> JSONResponse:
+        # 状态码与错误码由异常自带；detail 只有我们自己的文案，不含密钥。
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": str(error), "error_code": error.error_code},
+        )
+
+    @application.exception_handler(ModelDiscoveryError)
+    async def handle_model_discovery_error(
+        request: Request, error: ModelDiscoveryError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"detail": str(error), "error_code": error.error_code},
         )
 
     @application.exception_handler(RequestValidationError)
@@ -408,17 +468,90 @@ def create_app(
         # 降级事实必须能被看到：请求的后端与实际生效的后端在这里同时呈现。
         payload.update(graph_status or {})
         # 生成配置只透出不敏感的字段，base_url 与 api_key 一概不出现在这里。
-        payload.update(generation_status or _OFFLINE_GENERATION_STATUS)
+        # 模型状态每次请求现算：注册表可以被运行时替换，缓存启动时算好的那份
+        # 会让页面一直显示旧默认模型。显式传入 generation_status 的调用方
+        # （测试、嵌入式装配）优先，语义与改造前一致。
+        current = answer_service.registry.current
+        payload.update(
+            generation_status
+            if generation_status is not None
+            else current.system_status(generation_fallback)
+        )
         # 实际装配了哪个生成器由运行时对象决定，配置值不覆盖它。这里报的是
         # 注册表 ID 而不是生成器类名：`/models` 与 `metrics.generator` 都用 ID，
         # 三处必须是同一个取值域，否则前端按 ID 反查显示名称会落空。
-        payload["generator"] = answer_service.registry.id_of(answer_service.generator)
+        payload["generator"] = current.id_of(current.default_generator)
         return payload
 
     @application.get("/models")
     def models() -> dict[str, object]:
         """可选生成器清单。刻意不含 base_url：它可能带凭证。"""
-        return answer_service.registry.describe()
+        return answer_service.registry.current.describe()
+
+    # 以下六个接口属于本机管理操作：只有环回客户端能调用（见 _require_loopback）。
+    # 它们读写的是服务端保存的模型连接，任何响应都不含 API Key。
+
+    @application.get("/model-connections")
+    def model_connections_listing(request: Request) -> dict[str, object]:
+        """服务端保存的模型连接。只报告 has_api_key，不回显密钥本身。"""
+        _require_loopback(request)
+        return require_model_connections().describe()
+
+    @application.post("/model-connections/discover")
+    def discover_models_with_credentials(
+        payload: ModelDiscoveryRequest, request: Request
+    ) -> dict[str, object]:
+        """用临时凭证试一次发现：不落盘、不建连接，密钥用完即弃。"""
+        _require_loopback(request)
+        return require_model_connections().discover(
+            base_url=payload.base_url,
+            api_key=payload.api_key,
+            timeout=payload.timeout,
+        )
+
+    @application.post("/model-connections/{connection_id}/discover")
+    def discover_models_for_connection(
+        connection_id: str, request: Request
+    ) -> dict[str, object]:
+        """用已保存的地址与密钥重新发现；不要求客户端再提交一次密钥。"""
+        _require_loopback(request)
+        return require_model_connections().discover_connection(connection_id)
+
+    @application.put("/model-connections/{connection_id}")
+    def upsert_model_connection(
+        connection_id: str, payload: ModelConnectionRequest, request: Request
+    ) -> dict[str, object]:
+        """新增或整体替换一条连接，返回它的安全元数据。"""
+        _require_loopback(request)
+        return require_model_connections().upsert(
+            connection_id,
+            base_url=payload.base_url,
+            label=payload.label,
+            api_key=payload.api_key,
+            timeout=payload.timeout,
+            models=[item.model_dump() for item in payload.models],
+        )
+
+    @application.delete("/model-connections/{connection_id}")
+    def delete_model_connection(
+        connection_id: str, request: Request
+    ) -> dict[str, object]:
+        """删除连接及它注册的模型；默认模型属于它时自动回到内置离线选项。"""
+        _require_loopback(request)
+        return require_model_connections().delete(connection_id)
+
+    @application.put("/models/default")
+    def set_default_model(
+        payload: DefaultModelRequest, request: Request
+    ) -> dict[str, object]:
+        """改默认模型；未知与不可用沿用 /query 既有的 400 / 503 语义。"""
+        _require_loopback(request)
+        try:
+            return require_model_connections().set_default(payload.model_id)
+        except UnknownGeneratorError as error:
+            raise ApiError(400, "invalid_generator", str(error)) from error
+        except UnavailableGeneratorError as error:
+            raise ApiError(503, "generator_unavailable", str(error)) from error
 
     @application.get("/adapters")
     def adapters() -> dict[str, object]:
@@ -1056,6 +1189,39 @@ def _source_name(filename: str, field: str) -> str:
     if not name:
         raise ApiError(400, "invalid_request", f"{field} 不能为空")
     return name
+
+
+def _require_loopback(request: Request) -> None:
+    """模型管理接口只接受本机（环回）客户端。
+
+    这是本机管理接口，本身不带鉴权：能到达它的非本机客户端就能读改模型配置
+    —— 包括写入新的模型地址与密钥。因此安全边界就是这条地址判定，而不是一条
+    会让人误以为「可以放到公网」的鉴权。普通查询接口不受此限制。
+
+    允许内网地址作为**上游**是本机工具的产品需求（Ollama、LM Studio 就在本机
+    或内网），那与「谁能调用管理接口」是两件事。
+    """
+    client = request.client
+    host = client.host if client is not None else ""
+    if not _is_loopback(host):
+        raise ApiError(
+            403, "management_forbidden", "模型管理接口只允许从本机（环回地址）调用。"
+        )
+
+
+def _is_loopback(host: str) -> bool:
+    """对端地址是不是环回地址；拿不准一律算「不是」。"""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # 解析不出地址（例如没有 client 信息）时拒绝：宁可挡住，也不能让一个
+        # 身份不明的客户端改模型配置。
+        return False
+    if address.is_loopback:
+        return True
+    # 双栈监听会把 IPv4 回环报成 ::ffff:127.0.0.1，它是环回地址。
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped is not None and mapped.is_loopback
 
 
 def _too_large_detail(size: int, limit: int) -> str:
