@@ -16,6 +16,13 @@ const API_PREFIXES = [
   '/ingestions',
   '/ingestion-jobs',
   '/documents',
+  '/models',
+  '/adapters',
+  '/workspaces',
+  '/extractions',
+  '/candidate-entities',
+  '/candidate-relations',
+  '/candidates',
 ]
 
 export default defineConfig({

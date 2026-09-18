@@ -5,6 +5,7 @@ import App from './App'
 import './styles/tokens.css'
 import './styles/global.css'
 import './styles/app.css'
+import './styles/workbench.css'
 
 const container = document.getElementById('root')
 if (!container) {

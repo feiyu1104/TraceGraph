@@ -733,6 +733,27 @@ def create_app(
             document_repository,
         )
 
+    @application.get("/workspaces/{workspace_id}/extractions")
+    def list_workspace_extractions(
+        workspace_id: str,
+        document_id: str | None = QueryParam(default=None),
+    ) -> dict[str, object]:
+        """该 Workspace 的抽取任务历史，按创建时间倒序。
+
+        Workspace 是硬条件：别的 Workspace 的任务一条也读不到。带上
+        `document_id` 就只看这个文档的任务。
+        """
+        workspace = _require_workspace(document_repository, workspace_id)
+        return {
+            "workspace_id": workspace.id,
+            "runs": [
+                _run_response(run)
+                for run in active_candidates.list_runs(
+                    workspace.id, document_id=document_id
+                )
+            ],
+        }
+
     @application.get("/workspaces/{workspace_id}/candidates")
     def list_workspace_candidates(
         workspace_id: str,

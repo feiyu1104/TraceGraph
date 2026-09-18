@@ -218,3 +218,143 @@ export interface IngestionResult {
   version: { id: string; number: number; content_sha256: string }
   chunks: { id: string; index: number; locator: string }[]
 }
+
+/** 文档列表接口给出的候选计数；`total` 是三种审核状态之和，不含 published。 */
+export interface DocumentCandidateTally {
+  pending: number
+  approved: number
+  rejected: number
+  published: number
+  total: number
+}
+
+export interface WorkspaceDocument {
+  id: string
+  source_name: string
+  media_type: string
+  created_at: string | null
+  updated_at: string | null
+  latest_version_id: string | null
+  latest_version_created_at: string | null
+  chunk_count: number
+  /** 有过抽取任务即为 true，哪怕任务失败或一条候选都没产出。 */
+  has_extraction_runs: boolean
+  candidates: DocumentCandidateTally
+}
+
+export interface WorkspaceDocumentsResponse {
+  workspace_id: string
+  documents: WorkspaceDocument[]
+}
+
+export type ExtractionStatus = 'pending' | 'running' | 'succeeded' | 'failed'
+
+export interface ExtractionRun {
+  id: string
+  workspace_id: string
+  document_id: string
+  document_version_id: string
+  adapter_id: string
+  model_id: string
+  status: ExtractionStatus
+  entity_count: number
+  relation_count: number
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ExtractionRunsResponse {
+  workspace_id: string
+  runs: ExtractionRun[]
+}
+
+/** 候选的一条证据：真实 Chunk 的原文与它在文档里的位置。 */
+export interface CandidateEvidenceChunk {
+  chunk_id: string
+  content: string
+  source_name: string
+  locator: string
+}
+
+export type CandidateStatus = 'pending' | 'approved' | 'rejected'
+
+export interface CandidateEntity {
+  id: string
+  extraction_run_id: string
+  workspace_id: string
+  document_id: string
+  document_version_id: string
+  adapter_id: string
+  name: string
+  type: string
+  status: CandidateStatus
+  is_published: boolean
+  published_at: string | null
+  graph_id: string | null
+  evidence: CandidateEvidenceChunk[]
+  created_at: string
+  updated_at: string
+}
+
+export interface CandidateRelation {
+  id: string
+  extraction_run_id: string
+  workspace_id: string
+  document_id: string
+  document_version_id: string
+  adapter_id: string
+  source_entity_id: string
+  target_entity_id: string
+  type: string
+  status: CandidateStatus
+  is_published: boolean
+  published_at: string | null
+  graph_id: string | null
+  evidence: CandidateEvidenceChunk[]
+  created_at: string
+  updated_at: string
+}
+
+/** 文档级候选清单：一次给出该文档全部抽取任务的候选。 */
+export interface WorkspaceCandidatesResponse {
+  workspace_id: string
+  entities: CandidateEntity[]
+  relations: CandidateRelation[]
+}
+
+/** 单次抽取任务的候选清单，附带任务本身。 */
+export interface RunCandidatesResponse {
+  run: ExtractionRun
+  entities: CandidateEntity[]
+  relations: CandidateRelation[]
+}
+
+export interface BatchReviewResponse {
+  workspace_id: string
+  status: CandidateStatus
+  entities: CandidateEntity[]
+  relations: CandidateRelation[]
+}
+
+/** 发布结果：新建、复用、幂等跳过各有多少。 */
+export interface PublicationCounts {
+  entities_created: number
+  entities_reused: number
+  entities_skipped: number
+  relations_created: number
+  relations_reused: number
+  relations_skipped: number
+}
+
+export interface PublicationResult {
+  workspace_id: string
+  backend: string
+  counts: PublicationCounts
+  created_entity_ids: string[]
+  reused_entity_ids: string[]
+  skipped_entity_ids: string[]
+  created_relation_ids: string[]
+  reused_relation_ids: string[]
+  skipped_relation_ids: string[]
+}

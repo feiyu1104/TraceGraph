@@ -39,6 +39,11 @@ interface DocumentImportProps {
   maxUploadBytes: number | null
   /** 上传忙状态上报给页面，用于在上传期间锁住知识库切换。 */
   onBusyChange: (busy: boolean) => void
+  /**
+   * 这次上传确实落库之后回调一次（含「内容未变化」的 skipped），
+   * 由页面决定要不要重取文档清单。上传失败不会调用。
+   */
+  onImported?: () => void
 }
 
 export default function DocumentImport({
@@ -46,6 +51,7 @@ export default function DocumentImport({
   workspaceName,
   maxUploadBytes,
   onBusyChange,
+  onImported,
 }: DocumentImportProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [file, setFile] = useState<File | null>(null)
@@ -80,6 +86,7 @@ export default function DocumentImport({
     setResult(null)
     try {
       setResult(await uploadDocument(file, workspaceId))
+      onImported?.()
     } catch (error) {
       setRequestError(
         error instanceof ApiRequestError

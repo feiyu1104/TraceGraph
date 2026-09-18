@@ -1,12 +1,22 @@
 import type {
   AdaptersResponse,
   Answer,
+  BatchReviewResponse,
+  CandidateEntity,
+  CandidateRelation,
+  CandidateStatus,
   EntityRelations,
   EntitySearchResult,
+  ExtractionRun,
+  ExtractionRunsResponse,
   IngestionResult,
   ModelsResponse,
+  PublicationResult,
   RelationEvidence,
+  RunCandidatesResponse,
   SystemInfo,
+  WorkspaceCandidatesResponse,
+  WorkspaceDocumentsResponse,
   WorkspaceInfo,
   WorkspacesResponse,
 } from './types'
@@ -62,6 +72,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function postJson(body: unknown): RequestInit {
   return {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }
+}
+
+function patchJson(body: unknown): RequestInit {
+  return {
+    method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }
@@ -190,5 +208,130 @@ export function fetchRelationEvidence(
   const params = new URLSearchParams({ workspace_id: workspaceId })
   return request<RelationEvidence>(
     `/graph/relations/${encodeURIComponent(relationId)}/evidence?${params}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 文档与知识工作台。每个请求都显式带上 workspace_id：服务端虽然有默认值，
+// 但页面从不依赖它 —— 少带一次就会静默地读到另一个知识库的数据。
+// ---------------------------------------------------------------------------
+
+export function fetchWorkspaceDocuments(
+  workspaceId: string,
+): Promise<WorkspaceDocumentsResponse> {
+  return request<WorkspaceDocumentsResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/documents`,
+  )
+}
+
+export function fetchExtractionRuns(
+  workspaceId: string,
+  documentId?: string,
+): Promise<ExtractionRunsResponse> {
+  const params = new URLSearchParams()
+  if (documentId) params.set('document_id', documentId)
+  const query = params.toString()
+  return request<ExtractionRunsResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/extractions${query ? `?${query}` : ''}`,
+  )
+}
+
+export function startExtraction(
+  workspaceId: string,
+  documentId: string,
+  modelId: string,
+): Promise<ExtractionRun> {
+  return request<ExtractionRun>(
+    '/extractions',
+    postJson({
+      workspace_id: workspaceId,
+      document_id: documentId,
+      // 空串表示交给服务端默认模型。
+      model_id: modelId || null,
+    }),
+  )
+}
+
+export function fetchExtractionRun(runId: string): Promise<ExtractionRun> {
+  return request<ExtractionRun>(`/extractions/${encodeURIComponent(runId)}`)
+}
+
+export function fetchRunCandidates(runId: string): Promise<RunCandidatesResponse> {
+  return request<RunCandidatesResponse>(
+    `/extractions/${encodeURIComponent(runId)}/candidates`,
+  )
+}
+
+export function fetchWorkspaceCandidates(
+  workspaceId: string,
+  documentId: string,
+): Promise<WorkspaceCandidatesResponse> {
+  const params = new URLSearchParams({ document_id: documentId })
+  return request<WorkspaceCandidatesResponse>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/candidates?${params}`,
+  )
+}
+
+/** 候选实体的单条审核与内容修正；只提交真正要改的字段。 */
+export function reviewCandidateEntity(
+  candidateId: string,
+  workspaceId: string,
+  changes: { status?: CandidateStatus; name?: string; type?: string },
+): Promise<CandidateEntity> {
+  return request<CandidateEntity>(
+    `/candidate-entities/${encodeURIComponent(candidateId)}`,
+    patchJson({ workspace_id: workspaceId, ...changes }),
+  )
+}
+
+/** 候选关系的单条审核与内容修正；只提交真正要改的字段。 */
+export function reviewCandidateRelation(
+  candidateId: string,
+  workspaceId: string,
+  changes: {
+    status?: CandidateStatus
+    source_entity_id?: string
+    target_entity_id?: string
+    type?: string
+  },
+): Promise<CandidateRelation> {
+  return request<CandidateRelation>(
+    `/candidate-relations/${encodeURIComponent(candidateId)}`,
+    patchJson({ workspace_id: workspaceId, ...changes }),
+  )
+}
+
+export function batchReviewCandidates(
+  workspaceId: string,
+  status: CandidateStatus,
+  entityIds: string[],
+  relationIds: string[],
+): Promise<BatchReviewResponse> {
+  return request<BatchReviewResponse>(
+    '/candidates/batch-review',
+    postJson({
+      workspace_id: workspaceId,
+      status,
+      entity_ids: entityIds,
+      relation_ids: relationIds,
+    }),
+  )
+}
+
+/**
+ * 发布到当前 Workspace 的图谱。两种指法二选一：给 extraction_run_id 发布
+ * 该次抽取里全部已批准的候选，否则发布显式列出的候选 ID。
+ */
+export type PublicationTarget =
+  | { extraction_run_id: string }
+  | { candidate_entity_ids: string[]; candidate_relation_ids: string[] }
+
+export function publishGraph(
+  workspaceId: string,
+  target: PublicationTarget,
+): Promise<PublicationResult> {
+  return request<PublicationResult>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/graph-publications`,
+    postJson(target),
   )
 }

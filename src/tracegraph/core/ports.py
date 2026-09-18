@@ -273,6 +273,16 @@ class CandidateRepository(Protocol):
 
     def get_run(self, run_id: str) -> ExtractionRun | None: ...
 
+    def list_runs(
+        self, workspace_id: str, *, document_id: str | None = None
+    ) -> tuple[ExtractionRun, ...]:
+        """该 Workspace 的抽取任务，按创建时间倒序。
+
+        与其它查询同理，`workspace_id` 是硬条件：别的 Workspace 的任务一条也
+        读不到。`document_id` 为 None 时返回该 Workspace 的全部任务。
+        """
+        ...
+
     def list_entities(self, run_id: str) -> tuple[CandidateEntity, ...]: ...
 
     def list_relations(self, run_id: str) -> tuple[CandidateRelation, ...]: ...

@@ -17,6 +17,23 @@ const HINTS: Record<string, string> = {
     '该知识库记录的适配器当前不可用（不在服务端注册表里），请换一个知识库；适配器不能由前端改写。',
   workspace_not_found: '这个知识库不存在，请重新选择。',
   unsupported_document: '当前不支持这种文档格式，请改用 TXT、Markdown、JSON、JSONL、CSV 或文本型 PDF。',
+  extraction_failed:
+    '这次知识抽取没有跑完，失败原因见上方信息。可以检查文档内容后重新抽取，或换一个模型再试。',
+  extraction_model_unsupported:
+    '所选模型不能用于知识抽取，请改选离线摘录或另一个支持抽取的模型。',
+  candidate_workspace_mismatch:
+    '这条候选不属于当前知识库，列表可能已经过期，请刷新候选列表后重试。',
+  candidate_content_conflict:
+    '改动与现有候选冲突：类型必须在当前适配器的类型清单里，两端不能相同，端点必须来自同一次抽取。',
+  illegal_candidate_transition:
+    '这个审核操作在当前状态下不允许；已发布或状态不对的候选不能这样改，请刷新后重试。',
+  candidate_already_published:
+    '候选已经发布到图谱，撤销发布尚未实现，因此不能再修改或退回。',
+  candidate_not_approved: '只有已批准的候选可以发布，请先批准这几条候选。',
+  candidate_evidence_missing:
+    '候选的原文证据已经找不到（文档或切片可能被删除），发布被拒绝。请重新抽取。',
+  publication_conflict:
+    '关系的端点还没有进入图谱。请把端点实体连同这条关系一起批准，并在同一次发布里提交。',
 }
 
 const GENERATION_HINTS: Record<string, string> = {

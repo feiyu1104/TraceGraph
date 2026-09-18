@@ -11,11 +11,12 @@ import {
 } from './api/client'
 import type { AdapterInfo, Answer, ModelInfo, SystemInfo, WorkspaceInfo } from './api/types'
 import AnswerPanel from './components/AnswerPanel'
-import DocumentImport from './components/DocumentImport'
+import DocumentsWorkbench from './components/DocumentsWorkbench'
 import GraphExplorer from './components/GraphExplorer'
 import Header from './components/Header'
 import ModelSelector from './components/ModelSelector'
 import QuestionForm from './components/QuestionForm'
+import TabBar, { type TabKey } from './components/TabBar'
 import WorkspaceBar from './components/WorkspaceBar'
 
 const OFFLINE_MODEL: ModelInfo = {
@@ -59,7 +60,12 @@ export default function App() {
   const [adapters, setAdapters] = useState<AdapterInfo[]>([])
   const [adaptersError, setAdaptersError] = useState<string | null>(null)
   const [workspaceId, setWorkspaceId] = useState(FALLBACK_WORKSPACE.id)
-  const [uploadBusy, setUploadBusy] = useState(false)
+  const [tab, setTab] = useState<TabKey>('qa')
+  // 文档与知识工作台里任何一次上传 / 抽取 / 审核 / 发布进行中；与问答的 busy
+  // 一样，用来在写入期间锁住知识库切换。
+  const [workbenchBusy, setWorkbenchBusy] = useState(false)
+  // 发布成功后 +1，图谱浏览按它重新挂载并重新加载当前知识库的图。
+  const [graphRevision, setGraphRevision] = useState(0)
 
   const [question, setQuestion] = useState('')
   const [maxHops, setMaxHops] = useState(2)
@@ -164,8 +170,8 @@ export default function App() {
   // 查询。用 ref 取最新值，判断的才是「创建成功的这一刻」在不在忙。
   const requestBusyRef = useRef(false)
   useEffect(() => {
-    requestBusyRef.current = busy || uploadBusy
-  }, [busy, uploadBusy])
+    requestBusyRef.current = busy || workbenchBusy
+  }, [busy, workbenchBusy])
 
   const handleCreated = useCallback(
     (workspace: WorkspaceInfo): boolean => {
@@ -240,6 +246,12 @@ export default function App() {
     : '—'
 
   const currentWorkspaceName = currentWorkspace?.name ?? workspaceId
+  // 适配器的类型清单只有一个来源：服务端 /adapters。前端不另立一份业务规则。
+  const currentAdapter =
+    adapters.find((adapter) => adapter.id === currentWorkspace?.adapter_id) ?? null
+  const currentAdapterLabel = currentAdapter?.label ?? currentWorkspace?.adapter_id ?? '—'
+
+  const handleGraphChanged = useCallback(() => setGraphRevision((current) => current + 1), [])
 
   return (
     <div className="app">
@@ -253,85 +265,101 @@ export default function App() {
         adaptersError={adaptersError}
         listNotice={workspacesNotice}
         supportsGraph={supportsGraph}
-        disabled={busy || uploadBusy}
+        disabled={busy || workbenchBusy}
         onCreated={handleCreated}
       />
 
-      <main className="app__grid">
-        <section className="app__column app__column--main" aria-label="知识问答">
-          <div className="panel">
-            <h2 className="panel__title">知识问答</h2>
-            <QuestionForm
-              question={question}
-              onQuestionChange={setQuestion}
-              maxHops={maxHops}
-              onMaxHopsChange={setMaxHops}
-              onSubmit={() => void runQuery()}
-              onClear={clearAll}
-              busy={busy}
-              multiHopEnabled={supportsGraph}
-              retrievalNotice={supportsGraph ? null : KEYWORD_ONLY_NOTICE}
-              adapterId={currentWorkspace?.adapter_id ?? ''}
-              modelSelector={
-                <ModelSelector
-                  models={models}
-                  selected={generatorId}
-                  defaultId={defaultModelId}
-                  onChange={setGeneratorId}
-                  disabled={busy}
-                  error={modelNotice}
+      <TabBar active={tab} onChange={setTab} />
+
+      <main className={`app__grid${tab === 'qa' ? '' : ' app__grid--single'}`}>
+        {tab === 'qa' && (
+          <section className="app__column app__column--main" aria-label="知识问答">
+            <div className="panel">
+              <h2 className="panel__title">知识问答</h2>
+              <QuestionForm
+                question={question}
+                onQuestionChange={setQuestion}
+                maxHops={maxHops}
+                onMaxHopsChange={setMaxHops}
+                onSubmit={() => void runQuery()}
+                onClear={clearAll}
+                busy={busy}
+                multiHopEnabled={supportsGraph}
+                retrievalNotice={supportsGraph ? null : KEYWORD_ONLY_NOTICE}
+                adapterId={currentWorkspace?.adapter_id ?? ''}
+                modelSelector={
+                  <ModelSelector
+                    models={models}
+                    selected={generatorId}
+                    defaultId={defaultModelId}
+                    onChange={setGeneratorId}
+                    disabled={busy}
+                    error={modelNotice}
+                  />
+                }
+              />
+            </div>
+
+            <div className="panel">
+              <h2 className="panel__title">回答</h2>
+              <AnswerPanel
+                answer={answer}
+                error={queryError}
+                busy={busy}
+                hasAsked={hasAsked}
+                generatorLabel={generatorLabel}
+                workspaceLabel={usedWorkspaceLabel}
+                workspaceId={usedWorkspaceId ?? workspaceId}
+                adapterLabel={usedAdapterLabel}
+                retrieverLabel={usedRetrieverLabel}
+                drawerOpen={drawerOpen}
+                onToggleDrawer={() => setDrawerOpen((open) => !open)}
+                reveal={reveal}
+                onSelectEvidence={selectEvidence}
+                onRetry={() => void runQuery()}
+              />
+            </div>
+          </section>
+        )}
+
+        {tab === 'knowledge' && (
+          <DocumentsWorkbench
+            // 换库即重挂：上一个知识库的文档、候选、错误与勾选都不能留下。
+            key={workspaceId}
+            workspaceId={workspaceId}
+            workspaceName={currentWorkspaceName}
+            adapterId={currentWorkspace?.adapter_id ?? ''}
+            adapterLabel={currentAdapterLabel}
+            entityTypes={currentAdapter?.entity_types ?? []}
+            relationTypes={currentAdapter?.relation_types ?? []}
+            models={models}
+            maxUploadBytes={
+              typeof system?.max_upload_bytes === 'number' ? system.max_upload_bytes : null
+            }
+            graphAvailable={supportsGraph}
+            onGraphChanged={handleGraphChanged}
+            onBusyChange={setWorkbenchBusy}
+          />
+        )}
+
+        {tab === 'graph' && (
+          <section className="app__column app__column--main" aria-label="图谱浏览">
+            <div className="panel">
+              <h2 className="panel__title">图谱浏览</h2>
+              {supportsGraph ? (
+                <GraphExplorer
+                  // 换库或发布成功后重挂：图内容变了就必须重新加载。
+                  key={`${workspaceId}:${graphRevision}`}
+                  workspaceId={workspaceId}
                 />
-              }
-            />
-          </div>
-
-          <div className="panel">
-            <h2 className="panel__title">回答</h2>
-            <AnswerPanel
-              answer={answer}
-              error={queryError}
-              busy={busy}
-              hasAsked={hasAsked}
-              generatorLabel={generatorLabel}
-              workspaceLabel={usedWorkspaceLabel}
-              workspaceId={usedWorkspaceId ?? workspaceId}
-              adapterLabel={usedAdapterLabel}
-              retrieverLabel={usedRetrieverLabel}
-              drawerOpen={drawerOpen}
-              onToggleDrawer={() => setDrawerOpen((open) => !open)}
-              reveal={reveal}
-              onSelectEvidence={selectEvidence}
-              onRetry={() => void runQuery()}
-            />
-          </div>
-        </section>
-
-        <section className="app__column app__column--side" aria-label="图谱浏览与文档导入">
-          <div className="panel">
-            <h2 className="panel__title">图谱浏览</h2>
-            {supportsGraph ? (
-              <GraphExplorer key={workspaceId} workspaceId={workspaceId} />
-            ) : (
-              <p className="panel__note">
-                当前服务未启用图存储，暂时只能使用文本检索。
-              </p>
-            )}
-          </div>
-
-          <div className="panel">
-            <h2 className="panel__title">文档导入</h2>
-            <DocumentImport
-              // 换库即重挂：上一次的入库结果属于另一个知识库，不能留在界面上。
-              key={workspaceId}
-              workspaceId={workspaceId}
-              workspaceName={currentWorkspaceName}
-              maxUploadBytes={
-                typeof system?.max_upload_bytes === 'number' ? system.max_upload_bytes : null
-              }
-              onBusyChange={setUploadBusy}
-            />
-          </div>
-        </section>
+              ) : (
+                <p className="panel__note">
+                  当前服务未启用图存储，暂时只能使用文本检索。
+                </p>
+              )}
+            </div>
+          </section>
+        )}
       </main>
 
       <footer className="app-footer">

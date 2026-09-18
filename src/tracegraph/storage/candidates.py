@@ -102,6 +102,25 @@ class InMemoryCandidateRepository:
         with self._lock:
             return self._runs.get(run_id)
 
+    def list_runs(
+        self, workspace_id: str, *, document_id: str | None = None
+    ) -> tuple[ExtractionRun, ...]:
+        with self._lock:
+            return tuple(
+                sorted(
+                    (
+                        run
+                        for run in self._runs.values()
+                        if run.workspace_id == workspace_id
+                        and (document_id is None or run.document_id == document_id)
+                    ),
+                    # 创建时间倒序；同一时刻创建的任务再按 ID 倒序，
+                    # 与 SQLite 侧的 ORDER BY created_at DESC, id DESC 一致。
+                    key=lambda run: (run.created_at, run.id),
+                    reverse=True,
+                )
+            )
+
     def list_entities(self, run_id: str) -> tuple[CandidateEntity, ...]:
         with self._lock:
             return tuple(
@@ -542,6 +561,19 @@ class SQLiteCandidateRepository:
                 "SELECT * FROM extraction_runs WHERE id = ?", (run_id,)
             ).fetchone()
         return _run_from_row(row) if row else None
+
+    def list_runs(
+        self, workspace_id: str, *, document_id: str | None = None
+    ) -> tuple[ExtractionRun, ...]:
+        query = "SELECT * FROM extraction_runs WHERE workspace_id = ?"
+        parameters: list[str] = [workspace_id]
+        if document_id is not None:
+            query += " AND document_id = ?"
+            parameters.append(document_id)
+        query += " ORDER BY created_at DESC, id DESC"
+        with self._lock:
+            rows = self._connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(_run_from_row(row) for row in rows)
 
     def list_entities(self, run_id: str) -> tuple[CandidateEntity, ...]:
         with self._lock:
