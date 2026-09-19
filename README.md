@@ -1,6 +1,6 @@
 <div align="center">
   <h1>TraceGraph</h1>
-  <p><strong>让知识库的每一个回答，都能沿着证据回到原文。</strong></p>
+  <p><strong>让知识库的每一个回答，都能沿着证据回到原文</strong></p>
   <p>面向真实文档的 Evidence-first GraphRAG 原型</p>
   <p>
     <img alt="License: Apache-2.0" src="https://img.shields.io/badge/License-Apache--2.0-6d5dfc.svg">
